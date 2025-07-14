@@ -136,7 +136,6 @@ datasets/
 *_chunks/
 chembl_chunks/
 chembl_scaffold_chunks/
-*.csv
 *.tsv
 *.json
 *.jsonl
