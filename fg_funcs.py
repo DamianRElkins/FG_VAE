@@ -194,6 +194,36 @@ def vae_loss(recon_x, x, mu, log_var, beta=1):
     kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
     return (bce + beta * kld) / x.size(0), bce / x.size(0), kld / x.size(0)
 
+def weighted_bce_loss(recon_x, x, weights):
+    """
+    Computes a weighted binary cross-entropy loss.
+    Args:
+        recon_x (torch.Tensor): Reconstructed input.
+        x (torch.Tensor): Original input.
+        weights (torch.Tensor): Weights for each sample.
+    Returns:
+        torch.Tensor: Weighted binary cross-entropy loss.
+    """
+    bce = nn.functional.binary_cross_entropy(recon_x, x, reduction='none')
+    return (bce * weights).mean()
+
+def weighted_vae_loss(recon_x, x, mu, log_var, weights, beta=1):
+    """
+    Computes a weighted loss for a Variational Autoencoder (VAE).
+    Args:
+        recon_x (torch.Tensor): Reconstructed input.
+        x (torch.Tensor): Original input.
+        mu (torch.Tensor): Mean of latent distribution.
+        log_var (torch.Tensor): Log variance of latent distribution.
+        weights (torch.Tensor): Weights for each sample.
+        beta (float): Weight for KL divergence term.
+    Returns:
+        tuple: (total_loss, bce_loss, kld_loss) per batch.
+    """
+    bce = weighted_bce_loss(recon_x, x, weights)
+    kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1).mean()
+    return bce + beta * kld, bce, kld
+
 def visualize_latent_space(model, dataset, fg_indicies=[0, 1, 2, 3], method='tsne', sample_size=None):
     """
     Visualizes the latent space of a VAE model using dimensionality reduction and colors by functional group combinations.
@@ -327,15 +357,34 @@ def f1_score(y_true, y_pred):
 
     return f1, precision, recall
 
+def matthews_corrcoef(y_true, y_pred):
+    """
+    Computes the Matthews correlation coefficient for binary classification.
+    Args:
+        y_true (np.ndarray): Ground truth binary array.
+        y_pred (np.ndarray): Predicted binary array.
+    Returns:
+        float: Matthews correlation coefficient.
+    """
+    tp = np.sum((y_true == 1) & (y_pred == 1))
+    tn = np.sum((y_true == 0) & (y_pred == 0))
+    fp = np.sum((y_true == 0) & (y_pred == 1))
+    fn = np.sum((y_true == 1) & (y_pred == 0))
+    numerator = (tp * tn) - (fp * fn)
+    denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+
 def calculate_reconstruction_quality(model, dataset, threshold=0.5):
     """
-    Evaluates the reconstruction quality of a model on a given dataset using Tanimoto similarity, F1 score, precision, recall, and uniqueness.
+    Evaluates the reconstruction quality of a model on a given dataset using Tanimoto similarity, F1 score, precision, recall, uniqueness, and Matthews correlation coefficient.
     Args:
         model (torch.nn.Module): Model to evaluate, expected to output reconstructed fingerprints.
         dataset (torch.utils.data.Dataset): Dataset containing input fingerprints and labels.
         threshold (float): Threshold for binarizing reconstructed fingerprints.
     Returns:
-        tuple: (tanimoto_scores, f1_scores, precision_scores, recall_scores, uniqueness)
+        tuple: (tanimoto_scores, f1_scores, precision_scores, recall_scores, uniqueness, mcc_scores)
     """
     model.eval()
     all_fingerprints = []
@@ -365,32 +414,48 @@ def calculate_reconstruction_quality(model, dataset, threshold=0.5):
 
     tanimoto_scores = np.array(tanimoto_scores)
 
-    # Calculate F1 score, precision, and recall for each fingerprint
+    # Calculate F1 score, precision, recall, and MCC for each fingerprint
     f1_scores = []
     precision_scores = []
     recall_scores = []
+    mcc_scores = []
     for i in range(len(all_fingerprints)):
         y_true = all_fingerprints[i]
         y_pred = all_reconstructions[i] > threshold
         y_true = y_true.astype(int)
         y_pred = y_pred.astype(int)
         f1, precision, recall = f1_score(y_true, y_pred)
+        mcc = matthews_corrcoef(y_true, y_pred)
         f1_scores.append(f1)
         precision_scores.append(precision)
         recall_scores.append(recall)
+        mcc_scores.append(mcc)
 
     f1_scores = np.array(f1_scores)
     precision_scores = np.array(precision_scores)
     recall_scores = np.array(recall_scores)
+    mcc_scores = np.array(mcc_scores)
 
     # Calculate uniqueness of thresholded reconstructions
     unique_reconstructions = np.unique(all_reconstructions[all_reconstructions > threshold], axis=0)
     uniqueness = len(unique_reconstructions) / len(all_reconstructions[all_reconstructions > threshold])
 
-    return tanimoto_scores, f1_scores, precision_scores, recall_scores, uniqueness
+    return tanimoto_scores, f1_scores, precision_scores, recall_scores, uniqueness, mcc_scores
 
 # get average latent vector for each functional group
 def average_latent_vector(model, dataset, fg_col='fg_array', fg_indicies=[0, 1, 2, 3]):
+    """
+    Computes the average latent vector for each functional group in the dataset.
+    Args:
+        model (torch.nn.Module): Trained VAE model.
+        dataset (torch.utils.data.Dataset): Dataset containing input data and functional group vectors.
+        fg_col (str): Column name for functional group vectors in the dataset.
+        fg_indicies (list): List of indices of functional groups to compute averages for.
+    Returns:
+        dict: A dictionary mapping functional group indices to their average latent vectors.
+        Each value is a 1D numpy array representing the average latent vector for that functional group.
+        If no samples for a functional group are found, the value will be None.
+    """
     model.eval()
     fg_latents = {fg_idx: [] for fg_idx in fg_indicies}
 
@@ -414,27 +479,46 @@ def average_latent_vector(model, dataset, fg_col='fg_array', fg_indicies=[0, 1, 
     return avg_latents
 
 def plot_average_latent_vectors(avg_latents):
-    # Convert dict to sorted list for consistent plotting
-    fg_indices = sorted(avg_latents.keys())
-    latent_dim = len(next(iter(avg_latents.values())))  # infer latent dim
+    """
+    Plots the average latent vectors for each functional group as box plots,
+    where each box represents the distribution of average latent values for a given
+    latent dimension across all functional groups.
 
-    # Create matrix: rows = FG, cols = latent dimensions
-    data = np.array([avg_latents[fg] if avg_latents[fg] is not None else np.zeros(latent_dim)
-                     for fg in fg_indices])
-    
-    # Plot grouped bars
-    x = np.arange(latent_dim)  # latent dimension indices
-    bar_width = 0.8 / len(fg_indices)  # width for grouped bars
+    Args:
+        avg_latents (dict): A dictionary mapping functional group indices (keys) to their
+            average latent vectors (values). Each value should be a 1D array-like of latent values.
+            If a value is None, it will be replaced with zeros for plotting.
+    Displays:
+        A matplotlib figure showing box plots, where each box corresponds to a latent dimension,
+        and the box summarizes the distribution of average latent values for that dimension
+        across all functional groups. The plot includes axis labels, a title, and a grid.
+    """
+    if not avg_latents:
+        print("No data to plot.")
+        return
+
+    # Infer latent dimension from the first available average latent vector
+    latent_dim = len(next(iter(avg_latents.values())))
+
+    # Prepare data for box plot
+    # Each list in `data_for_boxplot` will represent the data for one box plot (one latent dimension)
+    data_for_boxplot = [[] for _ in range(latent_dim)]
+
+    for fg_index in sorted(avg_latents.keys()):
+        latent_vector = avg_latents[fg_index]
+        if latent_vector is None:
+            latent_vector = np.zeros(latent_dim)
+
+        for i in range(latent_dim):
+            data_for_boxplot[i].append(latent_vector[i])
 
     plt.figure(figsize=(12, 6))
-    for i, fg in enumerate(fg_indices):
-        plt.bar(x + i * bar_width, data[i], width=bar_width, label=f'FG{fg}')
+    plt.boxplot(data_for_boxplot)
 
-    plt.title('Average Latent Vectors by Functional Group')
+    plt.title('Distribution of Average Latent Values Across Functional Groups per Latent Dimension')
     plt.xlabel('Latent Dimension Index')
     plt.ylabel('Average Latent Value')
-    plt.xticks(x + bar_width * (len(fg_indices)-1) / 2, range(latent_dim))
-    plt.legend()
+    plt.xticks(np.arange(1, latent_dim + 1), range(latent_dim)) # Set x-ticks to correspond to dimensions
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
     plt.show()
@@ -504,38 +588,80 @@ def plot_distributions(plot_info_list, bins=50, figsize_per_plot=(5, 4)):
 ### ----------------------Functions for latent space metric---------------------- ###
 # Get nearest neighbors in latent space
 def get_nearest_neighbors(model, dataset, latents=None, n_neighbors=50):
+    """
+    Computes nearest neighbors in the latent space of a model for a given dataset.
+    Args:
+        model (torch.nn.Module): Trained model with latent space.
+        dataset (torch.utils.data.Dataset): Dataset to extract latent vectors from.
+        latents (np.ndarray or None): Precomputed latent vectors (optional).
+        n_neighbors (int): Number of neighbors to find.
+    Returns:
+        tuple: (NearestNeighbors object, latent vectors as np.ndarray)
+    """
     model.eval()
     if latents is None:
         latents = []
+        fg_labels = []
         with torch.no_grad():
-            for x, _, _ in DataLoader(dataset, batch_size=64, shuffle=False):
+            for x, fg, _ in DataLoader(dataset, batch_size=64, shuffle=False):
                 _, mu, _ = model(x)
                 latents.append(mu.cpu())
+                fg_labels.append(fg.cpu())
         latents = torch.cat(latents).numpy()
+        fg_labels = torch.cat(fg_labels).numpy()
 
-    # Find nearest neighbors
     nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='auto').fit(latents)
-    return nbrs, latents
+    return nbrs, latents, fg_labels
 
 def find_nearest_neighbors(nbrs, query_latent, n_neighbors=50):
+    """
+    Finds the nearest neighbors for a given latent vector using a fitted NearestNeighbors object.
+    Args:
+        nbrs (NearestNeighbors): Fitted NearestNeighbors object.
+        query_latent (np.ndarray): Latent vector to query.
+        n_neighbors (int): Number of neighbors to retrieve.
+    Returns:
+        tuple: (distances, indices) of nearest neighbors.
+    """
     distances, indices = nbrs.kneighbors(query_latent.reshape(1, -1), n_neighbors=n_neighbors)
     return distances.flatten(), indices.flatten()
 
 def get_fg_counts(dataset, fg_col='fg_array'):
-    """Get counts of functional groups in the dataset."""
+    """
+    Calculates the normalized counts (prevalence) of each functional group in the dataset.
+    Args:
+        dataset (torch.utils.data.Dataset): Dataset containing functional group arrays.
+        fg_col (str): Column name for functional group arrays.
+    Returns:
+        np.ndarray: Array of normalized counts for each functional group.
+    """
     df = dataset.data
     fg_list = df[fg_col].tolist()
-    fg_counts = {i: 0 for i in range(len(fg_list[0]))}  # Initialize counts for each functional group
+    fg_counts = {i: 0 for i in range(len(fg_list[0]))}
     for fg in fg_list:
         for i, val in enumerate(fg):
             if val == 1:
                 fg_counts[i] += 1
     fg_counts = np.array(list(fg_counts.values()))
-    fg_counts = fg_counts.astype(float)  # Ensure counts are float for normalization
-    return fg_counts / len(fg_list)  # Normalize by total number of samples
+    fg_counts = fg_counts.astype(float)
+    return fg_counts / len(fg_list)
 
-# Calculate percentage of nearest neighbors with the same functional group
 def metric(nbrs, dataset, query_index, latent, fg_counts, fg_col='fg_array', fg_indicies=[0, 1, 2, 3], n_neighbors=50):
+    """
+    Calculates the percentage of nearest neighbors sharing the same functional group(s) as the query,
+    normalized by the prevalence of those groups in the dataset.
+    Args:
+        nbrs (NearestNeighbors): Fitted NearestNeighbors object.
+        dataset (torch.utils.data.Dataset): Dataset containing functional group arrays.
+        query_index (int): Index of the query sample.
+        latent (np.ndarray): Array of latent vectors.
+        fg_counts (np.ndarray): Prevalence of each functional group.
+        fg_col (str): Column name for functional group arrays.
+        fg_indicies (list): Indices of functional groups to consider.
+        n_neighbors (int): Number of neighbors to use.
+    Returns:
+        float: Normalized percentage of neighbors with the same functional group(s).
+    """
     query_fg = dataset.data.iloc[query_index][fg_col]
     distances, indices = find_nearest_neighbors(nbrs, latent[query_index], n_neighbors)
 
@@ -545,11 +671,9 @@ def metric(nbrs, dataset, query_index, latent, fg_counts, fg_col='fg_array', fg_
         if any(neighbor_fg[fg_idx] == query_fg[fg_idx] == 1 for fg_idx in fg_indicies):
             same_fg_count += 1
     
-    # Normalize by the prevalence of the functional groups in the dataset
     fg_prevalence = np.mean([fg_counts[fg_idx] for fg_idx in fg_indicies if query_fg[fg_idx] == 1])
     if fg_prevalence == 0:
         return 0.0
 
     same_fg_percentage = (same_fg_count / n_neighbors) / fg_prevalence
     return same_fg_percentage
-
