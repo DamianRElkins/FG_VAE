@@ -1,4 +1,4 @@
-from fg_funcs import weighted_vae_loss, visualize_latent_space, calculate_reconstruction_quality, get_nearest_neighbors, metric, get_fg_counts, average_latent_vector, plot_average_latent_vectors, plot_distributions
+from fg_funcs import vae_loss
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -82,6 +82,7 @@ class FullVAETrainer(L.LightningModule):
             decoder_hidden_dims=decoder_hidden_dim
         )
         self.learning_rate = learning_rate
+        self.weights = torch.ones(input_dim)  # Initialize weights for BCE loss
 
     def forward(self, x):
         return self.model(x)
@@ -89,8 +90,8 @@ class FullVAETrainer(L.LightningModule):
     def training_step(self, batch, batch_idx):
         x, _, _ = batch
         recon_x, mu, log_var = self(x)
-        beta = min(1.5, self.current_epoch / 5)  # Gradually increase beta
-        loss, bce, kld = weighted_vae_loss(recon_x, x, mu, log_var, beta)
+        beta = min(1.5, self.current_epoch / 2)  # Gradually increase beta
+        loss, bce, kld = vae_loss(recon_x, x, mu, log_var, beta=beta)
         self.log('train_loss', loss)
         self.log('train_bce', bce)
         self.log('train_kld', kld)
@@ -99,7 +100,7 @@ class FullVAETrainer(L.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, _, _ = batch
         recon_x, mu, log_var = self(x)
-        loss, bce, kld = weighted_vae_loss(recon_x, x, mu, log_var)
+        loss, bce, kld = vae_loss(recon_x, x, mu, log_var)
         self.log('val_loss', loss, on_epoch=True, prog_bar=True)
         self.log('val_bce', bce, on_epoch=True, prog_bar=True)
         self.log('val_kld', kld, on_epoch=True, prog_bar=True)
@@ -108,7 +109,7 @@ class FullVAETrainer(L.LightningModule):
     def test_step(self, batch, batch_idx):
         x, _, _ = batch
         recon_x, mu, log_var = self(x)
-        loss, bce, kld = weighted_vae_loss(recon_x, x, mu, log_var)
+        loss, bce, kld = vae_loss(recon_x, x, mu, log_var)
         self.log('test_loss', loss, on_epoch=True, prog_bar=True)
         self.log('test_bce', bce, on_epoch=True, prog_bar=True)
         self.log('test_kld', kld, on_epoch=True, prog_bar=True)
@@ -156,15 +157,19 @@ def train_vae_model(dataset, input_dim, latent_dim, encoder_hidden_dims, decoder
 
 # Example usage
 if __name__ == "__main__":
-    full_dataset = pd.read_csv('chembl_35_fg_scaf.csv')
+    full_dataset = pd.read_csv('chembl_35_fg_full.csv')
 
     # Convert fingerprint to numpy array
-    full_dataset['fingerprint'] = full_dataset['fingerprint'].apply(lambda x: np.array(eval(x)))
-    full_dataset['fg_array'] = full_dataset['fg_array'].apply(lambda x: np.array(eval(x)))
+    full_dataset['fingerprint_array'] = full_dataset['fingerprint_array'].apply(
+        lambda x: np.fromstring(x.strip('[]'), sep=' ') if isinstance(x, str) else np.array(x)
+    )
+    full_dataset['fg_array'] = full_dataset['fg_array'].apply(
+        lambda x: np.fromstring(x.strip('[]'), sep=' ') if isinstance(x, str) else np.array(x)
+    )
 
     torch.manual_seed(42)  # For reproducibility
 
-    input_dim = len(full_dataset['fingerprint'].iloc[0])  # Assuming fingerprint is a list of features
+    input_dim = len(full_dataset['fingerprint_array'].iloc[0])  # Assuming fingerprint is a list of features
     latent_dim = 64  # Example latent dimension
     encoder_hidden_dims = [1024, 512, 256, 128]  # Example encoder hidden layers
     decoder_hidden_dims = [128, 256, 1024]  # Example decoder hidden layers
@@ -177,7 +182,7 @@ if __name__ == "__main__":
         decoder_hidden_dims=decoder_hidden_dims,
         batch_size=64,
         learning_rate=1e-3,
-        max_epochs=50
+        max_epochs=5
     )
 
     # Save the trained model

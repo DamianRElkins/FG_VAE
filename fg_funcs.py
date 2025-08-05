@@ -194,35 +194,6 @@ def vae_loss(recon_x, x, mu, log_var, beta=1):
     kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
     return (bce + beta * kld) / x.size(0), bce / x.size(0), kld / x.size(0)
 
-def weighted_bce_loss(recon_x, x, weights):
-    """
-    Computes a weighted binary cross-entropy loss.
-    Args:
-        recon_x (torch.Tensor): Reconstructed input.
-        x (torch.Tensor): Original input.
-        weights (torch.Tensor): Weights for each sample.
-    Returns:
-        torch.Tensor: Weighted binary cross-entropy loss.
-    """
-    bce = nn.functional.binary_cross_entropy(recon_x, x, reduction='none')
-    return (bce * weights).mean()
-
-def weighted_vae_loss(recon_x, x, mu, log_var, weights, beta=1):
-    """
-    Computes a weighted loss for a Variational Autoencoder (VAE).
-    Args:
-        recon_x (torch.Tensor): Reconstructed input.
-        x (torch.Tensor): Original input.
-        mu (torch.Tensor): Mean of latent distribution.
-        log_var (torch.Tensor): Log variance of latent distribution.
-        weights (torch.Tensor): Weights for each sample.
-        beta (float): Weight for KL divergence term.
-    Returns:
-        tuple: (total_loss, bce_loss, kld_loss) per batch.
-    """
-    bce = weighted_bce_loss(recon_x, x, weights)
-    kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1).mean()
-    return bce + beta * kld, bce, kld
 
 def visualize_latent_space(model, dataset, fg_indicies=[0, 1, 2, 3], method='tsne', sample_size=None):
     """

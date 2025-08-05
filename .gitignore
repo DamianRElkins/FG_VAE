@@ -202,3 +202,5 @@ tmp/
 temp/
 *.tmp
 *.temp
+chembl_35_fg_scaf_curated.csv
+chembl_35_fg_scaf.csv
