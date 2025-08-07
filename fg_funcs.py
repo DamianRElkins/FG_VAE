@@ -12,27 +12,24 @@ import torch.nn as nn
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from umap import UMAP
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.neighbors import NearestNeighbors
 import math
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-### ----------------------Functions for scaffold and EFG computation---------------------- ###
+PATT: Chem.Mol = Chem.MolFromSmarts("[$([D1]=[*])]")
+REPL: Chem.Mol = Chem.MolFromSmiles("*")
 
-PATT = Chem.MolFromSmarts("[$([D1]=[*])]")
-REPL = Chem.MolFromSmiles("*")
-
-def get_scaffold(mol, real_bm=True, use_csk=False, use_bajorath=False):
+def get_scaffold(
+    mol: Chem.Mol,
+    real_bm: bool = True,
+    use_csk: bool = False,
+    use_bajorath: bool = False
+) -> Chem.Mol:
     """
-    Extracts the Murcko scaffold from a molecule, with options for Bajorath modification and CSK canonization.
-    Args:
-        mol (rdkit.Chem.Mol): Input molecule.
-        real_bm (bool): Whether to apply real Bajorath modification.
-        use_csk (bool): Whether to canonize the scaffold using CSK.
-        use_bajorath (bool): Whether to apply Bajorath modification.
-    Returns:
-        rdkit.Chem.Mol: Scaffold molecule.
+    Generate the scaffold of a molecule using MurckoScaffold, with options for Bajorath and CSK modifications.
     """
     Chem.RemoveStereochemistry(mol)
     scaff = MurckoScaffold.GetScaffoldForMol(mol)
@@ -46,24 +43,20 @@ def get_scaffold(mol, real_bm=True, use_csk=False, use_bajorath=False):
             scaff = MurckoScaffold.GetScaffoldForMol(scaff)
     return scaff
 
-def save_chunk_results(dir, chunk_idx, results):
+def save_chunk_results(
+    dir: str,
+    chunk_idx: int,
+    results: Any
+) -> None:
     """
-    Saves results of a chunked computation to a pickle file.
-    Args:
-        dir (str): Directory to save the file.
-        chunk_idx (int): Chunk index.
-        results (object): Results to save.
+    Save results for a data chunk to a pickle file in the specified directory.
     """
     with open(os.path.join(dir, f"chunk_{chunk_idx}.pkl"), "wb") as f:
         pickle.dump(results, f)
 
-def safe_mol_from_smiles(smiles):
+def safe_mol_from_smiles(smiles: str) -> Optional[Chem.Mol]:
     """
-    Safely converts a SMILES string to an RDKit Mol object.
-    Args:
-        smiles (str): SMILES string.
-    Returns:
-        rdkit.Chem.Mol or None: Molecule object or None if conversion fails.
+    Safely convert a SMILES string to an RDKit Mol object, returning None if conversion fails.
     """
     try:
         mol = Chem.MolFromSmiles(smiles)
@@ -71,24 +64,16 @@ def safe_mol_from_smiles(smiles):
     except Exception:
         return None
 
-def compute_efgs(mol):
+def compute_efgs(mol: Chem.Mol) -> List[str]:
     """
-    Computes extended functional groups (EFGs) for a molecule.
-    Args:
-        mol (rdkit.Chem.Mol): Input molecule.
-    Returns:
-        list: List of EFG SMILES strings.
+    Compute extended functional groups (EFGs) for a molecule.
     """
     _, _, psmis, _ = efgs.get_dec_fgs(mol)
     return psmis
 
-def compute_efgs_safe(mol):
+def compute_efgs_safe(mol: Chem.Mol) -> Optional[List[str]]:
     """
-    Safely computes EFGs for a molecule, handling exceptions.
-    Args:
-        mol (rdkit.Chem.Mol): Input molecule.
-    Returns:
-        list or None: List of EFG SMILES or None if computation fails.
+    Safely compute EFGs for a molecule, returning None if computation fails.
     """
     try:
         return compute_efgs(mol)
@@ -96,50 +81,34 @@ def compute_efgs_safe(mol):
         print(f"Error computing EFGs for molecule: {mol}. Error: {e}")
         return None
 
-def compute_scaffold_safe(mol):
+def compute_scaffold_safe(mol: Chem.Mol) -> Optional[Chem.Mol]:
     """
-    Safely computes the scaffold for a molecule, handling exceptions.
-    Args:
-        mol (rdkit.Chem.Mol): Input molecule.
-    Returns:
-        rdkit.Chem.Mol or None: Scaffold molecule or None if computation fails.
+    Safely compute the scaffold for a molecule, returning None if computation fails.
     """
     try:
         return get_scaffold(mol)
     except Exception:
         return None
 
-### ----------------------Functions for fingerprint generation and functional group encoding---------------------- ###
-
-def create_mfpgen():
+def create_mfpgen() :
     """
-    Creates a Morgan fingerprint generator with radius 2 and 2048 bits.
-    Returns:
-        rdkit.Chem.rdFingerprintGenerator.MorganFingerprintGenerator: Fingerprint generator.
+    Create a Morgan fingerprint generator with radius 2 and 2048 bits.
     """
     return rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=2048)
 
 mfpgen = create_mfpgen()
 
-def mol_to_fingerprint(mol):
+def mol_to_fingerprint(mol: Optional[Chem.Mol]) -> Optional[DataStructs.cDataStructs.ExplicitBitVect]:
     """
-    Converts a molecule to a Morgan fingerprint.
-    Args:
-        mol (rdkit.Chem.Mol): Input molecule.
-    Returns:
-        rdkit.DataStructs.cDataStructs.ExplicitBitVect or None: Fingerprint or None if input is None.
+    Convert an RDKit Mol object to a Morgan fingerprint bit vector.
     """
     if mol is None:
         return None
     return mfpgen.GetFingerprint(mol)
 
-def smiles_to_mol(smiles):
+def smiles_to_mol(smiles: str) -> Optional[Chem.Mol]:
     """
-    Converts a SMILES string to an RDKit Mol object, handling exceptions.
-    Args:
-        smiles (str): SMILES string.
-    Returns:
-        rdkit.Chem.Mol or None: Molecule object or None if conversion fails.
+    Convert a SMILES string to an RDKit Mol object, returning None if conversion fails.
     """
     try:
         return Chem.MolFromSmiles(smiles)
@@ -147,14 +116,9 @@ def smiles_to_mol(smiles):
         print(f"Error converting SMILES {smiles}: {e}")
         return None
 
-def fg_to_array(fgs, fg_list):
+def fg_to_array(fgs: Union[List[str], None], fg_list: List[str]) -> np.ndarray:
     """
-    Encodes the presence of functional groups as a binary array.
-    Args:
-        fgs (list): List of functional groups present.
-        fg_list (list): List of all possible functional groups.
-    Returns:
-        np.ndarray: Binary array indicating presence of each functional group.
+    Convert a list of functional group SMILES to a binary array indicating presence in fg_list.
     """
     fg_array = np.zeros(len(fg_list), dtype=int)
     if isinstance(fgs, list):
@@ -163,51 +127,42 @@ def fg_to_array(fgs, fg_list):
                 fg_array[fg_list.index(fg)] = 1
     return fg_array
 
-def fp_to_array(fp):
+def fp_to_array(fp: DataStructs.cDataStructs.ExplicitBitVect) -> np.ndarray:
     """
-    Converts an RDKit fingerprint to a numpy array.
-    Args:
-        fp (rdkit.DataStructs.cDataStructs.ExplicitBitVect): Fingerprint.
-    Returns:
-        np.ndarray: Numpy array representation of the fingerprint.
+    Convert an RDKit fingerprint bit vector to a numpy array.
     """
     arr = np.zeros((1,), dtype=int)
     DataStructs.ConvertToNumpyArray(fp, arr)
     return arr
 
-### ----------------------Functions and Classes for VAE Creation and Testing---------------------- ###
-
-
-def vae_loss(recon_x, x, mu, log_var, beta=1):
+def vae_loss(
+    recon_x: torch.Tensor,
+    x: torch.Tensor,
+    mu: torch.Tensor,
+    log_var: torch.Tensor,
+    beta: float = 1
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Computes the loss for a Variational Autoencoder (VAE).
-    Args:
-        recon_x (torch.Tensor): Reconstructed input.
-        x (torch.Tensor): Original input.
-        mu (torch.Tensor): Mean of latent distribution.
-        log_var (torch.Tensor): Log variance of latent distribution.
-        beta (float): Weight for KL divergence term.
-    Returns:
-        tuple: (total_loss, bce_loss, kld_loss) per batch.
+    Compute the VAE loss, including reconstruction (BCE) and KL divergence, with optional beta weighting.
+    Returns total loss, BCE, and KLD, all normalized by batch size.
     """
     bce = nn.functional.binary_cross_entropy(recon_x, x, reduction='sum')
     kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
     return (bce + beta * kld) / x.size(0), bce / x.size(0), kld / x.size(0)
 
-
-def visualize_latent_space(model, dataset, fg_indicies=[0, 1, 2, 3], method='tsne', sample_size=None):
+def visualize_latent_space(
+    model: nn.Module,
+    dataset: Dataset,
+    fg_indicies: List[int] = [0, 1, 2, 3],
+    method: str = 'tsne',
+    sample_size: Optional[int] = None
+) -> None:
     """
-    Visualizes the latent space of a VAE model using dimensionality reduction and colors by functional group combinations.
-    Args:
-        model (torch.nn.Module): Trained VAE model.
-        dataset (torch.utils.data.Dataset): Dataset for visualization.
-        fg_indicies (list): Indices of functional groups to use for coloring.
-        method (str): Dimensionality reduction method ('tsne', 'pca', 'umap').
-        sample_size (int or None): Number of samples to plot (randomly selected).
+    Visualize the latent space of a VAE model using t-SNE, PCA, or UMAP, colored by functional group combinations.
     """
     model.eval()
-    latents = []
-    fg_labels = []
+    latents: List[torch.Tensor] = []
+    fg_labels: List[torch.Tensor] = []
 
     loader = DataLoader(dataset, batch_size=64, shuffle=False)
 
@@ -218,15 +173,14 @@ def visualize_latent_space(model, dataset, fg_indicies=[0, 1, 2, 3], method='tsn
             latents.append(mu.cpu())
             fg_labels.append(fg_vecs.cpu())
 
-    latents = torch.cat(latents).numpy()
-    fg_labels = torch.cat(fg_labels).numpy()
+    latents_np = torch.cat(latents).numpy()
+    fg_labels_np = torch.cat(fg_labels).numpy()
 
-    if sample_size and sample_size < len(latents):
-        indices = np.random.choice(len(latents), sample_size, replace=False)
-        latents = latents[indices]
-        fg_labels = fg_labels[indices]
+    if sample_size and sample_size < len(latents_np):
+        indices = np.random.choice(len(latents_np), sample_size, replace=False)
+        latents_np = latents_np[indices]
+        fg_labels_np = fg_labels_np[indices]
 
-    # Reduce dimensionality
     if method == 'tsne':
         reducer = TSNE(n_components=2, random_state=42)
     elif method == 'pca':
@@ -236,13 +190,13 @@ def visualize_latent_space(model, dataset, fg_indicies=[0, 1, 2, 3], method='tsn
     else:
         raise ValueError("Invalid method. Choose from 'tsne', 'pca', 'umap'.")
 
-    latents_2d = reducer.fit_transform(latents)
+    latents_2d = reducer.fit_transform(latents_np)
 
-    combined_labels = []
-    for i in range(len(fg_labels)):
-        label_parts = []
+    combined_labels: List[str] = []
+    for i in range(len(fg_labels_np)):
+        label_parts: List[str] = []
         for fg_idx in fg_indicies:
-            label_parts.append(f"{int(fg_labels[i, fg_idx])}")
+            label_parts.append(f"{int(fg_labels_np[i, fg_idx])}")
         combined_labels.append("_".join(label_parts))
 
     plt.figure(figsize=(8, 7))
@@ -257,20 +211,18 @@ def visualize_latent_space(model, dataset, fg_indicies=[0, 1, 2, 3], method='tsn
     plt.tight_layout()
     plt.show()
 
-def perform_umap_on_fingerprints(data, fingerprint_col='fingerprint_array', fg_col='fg_array', 
-                                 fg_indicies=[0, 1, 2, 3], n_neighbors=15, min_dist=0.1, metric='euclidean'):
+def perform_umap_on_fingerprints(
+    data: Any,
+    fingerprint_col: str = 'fingerprint_array',
+    fg_col: str = 'fg_array',
+    fg_indicies: List[int] = [0, 1, 2, 3],
+    n_neighbors: int = 15,
+    min_dist: float = 0.1,
+    metric: str = 'euclidean'
+) -> np.ndarray:
     """
-    Performs UMAP dimensionality reduction on molecular fingerprints and visualizes them colored by functional group combinations.
-    Args:
-        data (pd.DataFrame): DataFrame containing fingerprint and functional group arrays.
-        fingerprint_col (str): Column name for fingerprint arrays.
-        fg_col (str): Column name for functional group arrays.
-        fg_indicies (list): Indices of functional groups to use for coloring.
-        n_neighbors (int): UMAP parameter for local neighborhood size.
-        min_dist (float): UMAP parameter for minimum distance between points.
-        metric (str): Distance metric for UMAP.
-    Returns:
-        np.ndarray: UMAP embeddings of the fingerprints.
+    Perform UMAP dimensionality reduction on molecular fingerprints and visualize colored by functional groups.
+    Returns the UMAP embeddings.
     """
     fingerprints = np.array(data[fingerprint_col].tolist())
     fg_labels = np.array(data[fg_col].tolist())
@@ -278,9 +230,9 @@ def perform_umap_on_fingerprints(data, fingerprint_col='fingerprint_array', fg_c
     umap_model = UMAP(n_neighbors=n_neighbors, min_dist=min_dist, metric=metric, random_state=42)
     umap_embeddings = umap_model.fit_transform(fingerprints)
 
-    combined_labels = []
+    combined_labels: List[str] = []
     for i in range(len(fg_labels)):
-        label_parts = []
+        label_parts: List[str] = []
         for fg_idx in fg_indicies:
             if fg_idx < fg_labels.shape[1]:
                 label_parts.append(f"FG{fg_idx}_{int(fg_labels[i, fg_idx])}")
@@ -302,14 +254,12 @@ def perform_umap_on_fingerprints(data, fingerprint_col='fingerprint_array', fg_c
 
     return umap_embeddings
 
-def f1_score(y_true, y_pred):
+def f1_score(
+    y_true: np.ndarray,
+    y_pred: np.ndarray
+) -> Tuple[float, float, float]:
     """
-    Calculates the F1 score, precision, and recall for binary classification.
-    Args:
-        y_true (np.ndarray): Ground truth binary array.
-        y_pred (np.ndarray): Predicted binary array.
-    Returns:
-        tuple: (f1, precision, recall)
+    Compute F1 score, precision, and recall for binary classification arrays.
     """
     tp = np.sum((y_true == 1) & (y_pred == 1))
     fp = np.sum((y_true == 0) & (y_pred == 1))
@@ -328,14 +278,12 @@ def f1_score(y_true, y_pred):
 
     return f1, precision, recall
 
-def matthews_corrcoef(y_true, y_pred):
+def matthews_corrcoef(
+    y_true: np.ndarray,
+    y_pred: np.ndarray
+) -> float:
     """
-    Computes the Matthews correlation coefficient for binary classification.
-    Args:
-        y_true (np.ndarray): Ground truth binary array.
-        y_pred (np.ndarray): Predicted binary array.
-    Returns:
-        float: Matthews correlation coefficient.
+    Compute the Matthews correlation coefficient for binary classification arrays.
     """
     tp = np.sum((y_true == 1) & (y_pred == 1))
     tn = np.sum((y_true == 0) & (y_pred == 0))
@@ -347,20 +295,18 @@ def matthews_corrcoef(y_true, y_pred):
         return 0.0
     return numerator / denominator
 
-def calculate_reconstruction_quality(model, dataset, threshold=0.5):
+def calculate_reconstruction_quality(
+    model: nn.Module,
+    dataset: Dataset,
+    threshold: float = 0.5
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]:
     """
-    Evaluates the reconstruction quality of a model on a given dataset using Tanimoto similarity, F1 score, precision, recall, uniqueness, and Matthews correlation coefficient.
-    Args:
-        model (torch.nn.Module): Model to evaluate, expected to output reconstructed fingerprints.
-        dataset (torch.utils.data.Dataset): Dataset containing input fingerprints and labels.
-        threshold (float): Threshold for binarizing reconstructed fingerprints.
-    Returns:
-        tuple: (tanimoto_scores, f1_scores, precision_scores, recall_scores, uniqueness, mcc_scores)
+    Calculate reconstruction quality metrics for a VAE model, including Tanimoto, F1, precision, recall, uniqueness, and MCC.
     """
     model.eval()
-    all_fingerprints = []
-    all_reconstructions = []
-    all_fg_labels = []
+    all_fingerprints: List[torch.Tensor] = []
+    all_reconstructions: List[torch.Tensor] = []
+    all_fg_labels: List[torch.Tensor] = []
 
     loader = DataLoader(dataset, batch_size=64, shuffle=False)
 
@@ -372,27 +318,24 @@ def calculate_reconstruction_quality(model, dataset, threshold=0.5):
             all_reconstructions.append(recon_x.cpu())
             all_fg_labels.append(fg_vecs.cpu())
 
-    all_fingerprints = torch.cat(all_fingerprints).numpy()
-    all_reconstructions = torch.cat(all_reconstructions).numpy()
-    all_fg_labels = torch.cat(all_fg_labels).numpy()
+    all_fingerprints_np = torch.cat(all_fingerprints).numpy()
+    all_reconstructions_np = torch.cat(all_reconstructions).numpy()
 
-    # Calculate Tanimoto similarity
-    tanimoto_scores = []
-    for i in range(len(all_fingerprints)):
-        fp1 = Chem.DataStructs.cDataStructs.CreateFromBitString(''.join(map(str, all_fingerprints[i].astype(int))))
-        fp2 = Chem.DataStructs.cDataStructs.CreateFromBitString(''.join(map(str, (all_reconstructions[i] > threshold).astype(int))))
+    tanimoto_scores: List[float] = []
+    for i in range(len(all_fingerprints_np)):
+        fp1 = Chem.DataStructs.cDataStructs.CreateFromBitString(''.join(map(str, all_fingerprints_np[i].astype(int))))
+        fp2 = Chem.DataStructs.cDataStructs.CreateFromBitString(''.join(map(str, (all_reconstructions_np[i] > threshold).astype(int))))
         tanimoto_scores.append(DataStructs.TanimotoSimilarity(fp1, fp2))
 
-    tanimoto_scores = np.array(tanimoto_scores)
+    tanimoto_scores_np = np.array(tanimoto_scores)
 
-    # Calculate F1 score, precision, recall, and MCC for each fingerprint
-    f1_scores = []
-    precision_scores = []
-    recall_scores = []
-    mcc_scores = []
-    for i in range(len(all_fingerprints)):
-        y_true = all_fingerprints[i]
-        y_pred = all_reconstructions[i] > threshold
+    f1_scores: List[float] = []
+    precision_scores: List[float] = []
+    recall_scores: List[float] = []
+    mcc_scores: List[float] = []
+    for i in range(len(all_fingerprints_np)):
+        y_true = all_fingerprints_np[i]
+        y_pred = all_reconstructions_np[i] > threshold
         y_true = y_true.astype(int)
         y_pred = y_pred.astype(int)
         f1, precision, recall = f1_score(y_true, y_pred)
@@ -402,33 +345,27 @@ def calculate_reconstruction_quality(model, dataset, threshold=0.5):
         recall_scores.append(recall)
         mcc_scores.append(mcc)
 
-    f1_scores = np.array(f1_scores)
-    precision_scores = np.array(precision_scores)
-    recall_scores = np.array(recall_scores)
-    mcc_scores = np.array(mcc_scores)
+    f1_scores_np = np.array(f1_scores)
+    precision_scores_np = np.array(precision_scores)
+    recall_scores_np = np.array(recall_scores)
+    mcc_scores_np = np.array(mcc_scores)
 
-    # Calculate uniqueness of thresholded reconstructions
-    unique_reconstructions = np.unique(all_reconstructions[all_reconstructions > threshold], axis=0)
-    uniqueness = len(unique_reconstructions) / len(all_reconstructions[all_reconstructions > threshold])
+    unique_reconstructions = np.unique(all_reconstructions_np[all_reconstructions_np > threshold], axis=0)
+    uniqueness = len(unique_reconstructions) / len(all_reconstructions_np[all_reconstructions_np > threshold])
 
-    return tanimoto_scores, f1_scores, precision_scores, recall_scores, uniqueness, mcc_scores
+    return tanimoto_scores_np, f1_scores_np, precision_scores_np, recall_scores_np, uniqueness, mcc_scores_np
 
-# get average latent vector for each functional group
-def average_latent_vector(model, dataset, fg_col='fg_array', fg_indicies=[0, 1, 2, 3]):
+def average_latent_vector(
+    model: nn.Module,
+    dataset: Dataset,
+    fg_col: str = 'fg_array',
+    fg_indicies: List[int] = [0, 1, 2, 3]
+) -> Dict[int, Optional[np.ndarray]]:
     """
-    Computes the average latent vector for each functional group in the dataset.
-    Args:
-        model (torch.nn.Module): Trained VAE model.
-        dataset (torch.utils.data.Dataset): Dataset containing input data and functional group vectors.
-        fg_col (str): Column name for functional group vectors in the dataset.
-        fg_indicies (list): List of indices of functional groups to compute averages for.
-    Returns:
-        dict: A dictionary mapping functional group indices to their average latent vectors.
-        Each value is a 1D numpy array representing the average latent vector for that functional group.
-        If no samples for a functional group are found, the value will be None.
+    Compute the average latent vector for each functional group index in the dataset.
     """
     model.eval()
-    fg_latents = {fg_idx: [] for fg_idx in fg_indicies}
+    fg_latents: Dict[int, List[np.ndarray]] = {fg_idx: [] for fg_idx in fg_indicies}
 
     loader = DataLoader(dataset, batch_size=64, shuffle=False)
 
@@ -436,44 +373,33 @@ def average_latent_vector(model, dataset, fg_col='fg_array', fg_indicies=[0, 1, 
         for batch in loader:
             x, fg_vecs, _ = batch
             _, mu, _ = model(x)
-            mu = mu.cpu().numpy()
-            fg_vecs = fg_vecs.cpu().numpy()
+            mu_np = mu.cpu().numpy()
+            fg_vecs_np = fg_vecs.cpu().numpy()
 
-            for i in range(len(mu)):
+            for i in range(len(mu_np)):
                 for fg_idx in fg_indicies:
-                    if fg_vecs[i, fg_idx] == 1:  # Check if the functional group is present
-                        fg_latents[fg_idx].append(mu[i])
+                    if fg_vecs_np[i, fg_idx] == 1:
+                        fg_latents[fg_idx].append(mu_np[i])
 
-    # Calculate average latent vector for each functional group
-    avg_latents = {fg_idx: np.mean(fg_latents[fg_idx], axis=0) if fg_latents[fg_idx] else None for fg_idx in fg_indicies}
-    
+    avg_latents: Dict[int, Optional[np.ndarray]] = {
+        fg_idx: np.mean(fg_latents[fg_idx], axis=0) if fg_latents[fg_idx] else None
+        for fg_idx in fg_indicies
+    }
     return avg_latents
 
-def plot_average_latent_vectors(avg_latents):
+def plot_average_latent_vectors(
+    avg_latents: Dict[int, Optional[np.ndarray]]
+) -> None:
     """
-    Plots the average latent vectors for each functional group as box plots,
-    where each box represents the distribution of average latent values for a given
-    latent dimension across all functional groups.
-
-    Args:
-        avg_latents (dict): A dictionary mapping functional group indices (keys) to their
-            average latent vectors (values). Each value should be a 1D array-like of latent values.
-            If a value is None, it will be replaced with zeros for plotting.
-    Displays:
-        A matplotlib figure showing box plots, where each box corresponds to a latent dimension,
-        and the box summarizes the distribution of average latent values for that dimension
-        across all functional groups. The plot includes axis labels, a title, and a grid.
+    Plot boxplots of the average latent vectors for each functional group across latent dimensions.
     """
     if not avg_latents:
         print("No data to plot.")
         return
 
-    # Infer latent dimension from the first available average latent vector
     latent_dim = len(next(iter(avg_latents.values())))
 
-    # Prepare data for box plot
-    # Each list in `data_for_boxplot` will represent the data for one box plot (one latent dimension)
-    data_for_boxplot = [[] for _ in range(latent_dim)]
+    data_for_boxplot: List[List[float]] = [[] for _ in range(latent_dim)]
 
     for fg_index in sorted(avg_latents.keys()):
         latent_vector = avg_latents[fg_index]
@@ -489,24 +415,18 @@ def plot_average_latent_vectors(avg_latents):
     plt.title('Distribution of Average Latent Values Across Functional Groups per Latent Dimension')
     plt.xlabel('Latent Dimension Index')
     plt.ylabel('Average Latent Value')
-    plt.xticks(np.arange(1, latent_dim + 1), range(latent_dim)) # Set x-ticks to correspond to dimensions
+    plt.xticks(np.arange(1, latent_dim + 1), range(latent_dim))
     plt.grid(axis='y', linestyle='--', alpha=0.7)
     plt.tight_layout()
     plt.show()
 
-def plot_distributions(plot_info_list, bins=50, figsize_per_plot=(5, 4)):
+def plot_distributions(
+    plot_info_list: List[Dict[str, Any]],
+    bins: int = 50,
+    figsize_per_plot: Tuple[int, int] = (5, 4)
+) -> None:
     """
-    Generates histogram plots for any number of datasets, with customizable titles and x-axis labels.
-
-    Args:
-        plot_info_list (list of dict): A list where each dictionary represents one plot and must contain:
-                                        - 'data' (list or array-like): The numerical data for the histogram.
-                                        - 'title' (str): The title for this specific plot.
-                                        - 'xlabel' (str): The x-axis label for this specific plot.
-                                        Example: [{'data': [...], 'title': 'Tanimoto', 'xlabel': 'Similarity'}]
-        bins (int, optional): Number of bins for all histograms. Defaults to 50.
-        figsize_per_plot (tuple, optional): Base figure size (width, height) in inches for each subplot.
-                                            The total figure size will be calculated based on this. Defaults to (5, 4).
+    Plot multiple distributions as histograms with KDE, using provided plot information.
     """
     num_plots = len(plot_info_list)
 
@@ -514,32 +434,23 @@ def plot_distributions(plot_info_list, bins=50, figsize_per_plot=(5, 4)):
         print("No plot information provided.")
         return
 
-    # Determine grid layout for subplots
-    # We'll try to keep a maximum of 3 columns for readability
     ncols = min(num_plots, 3)
     nrows = math.ceil(num_plots / ncols)
 
-    # Calculate total figure size based on the number of rows and columns
     total_figsize_width = ncols * figsize_per_plot[0]
     total_figsize_height = nrows * figsize_per_plot[1]
 
-    # Create the figure and a grid of subplots
     fig, axes = plt.subplots(nrows, ncols, figsize=(total_figsize_width, total_figsize_height))
 
-    # If there's only one subplot, axes is not an array, so make it iterable
     if num_plots == 1:
         axes = [axes]
-    # If it's a 1D array (e.g., 1 row, multiple columns or vice versa), flatten it
     elif nrows == 1 or ncols == 1:
         axes = axes.flatten()
-    # Otherwise, axes is already a 2D array and can be flattened for easy iteration
     else:
         axes = axes.flatten()
 
-    # Iterate through the provided plot information and create each subplot
     for i, plot_info in enumerate(plot_info_list):
-        ax = axes[i] # Get the current subplot axis
-
+        ax = axes[i]
         data = plot_info['data']
         title = plot_info['title']
         xlabel = plot_info['xlabel']
@@ -549,102 +460,112 @@ def plot_distributions(plot_info_list, bins=50, figsize_per_plot=(5, 4)):
         ax.set_xlabel(xlabel)
         ax.set_ylabel('Frequency')
 
-    # Hide any unused subplots if the grid is larger than num_plots
     for j in range(num_plots, nrows * ncols):
-        fig.delaxes(axes[j]) # Remove unused axes
+        fig.delaxes(axes[j])
 
-    plt.tight_layout() # Adjust subplot parameters for a tight layout
+    plt.tight_layout()
     plt.show()
 
-### ----------------------Functions for latent space metric---------------------- ###
-# Get nearest neighbors in latent space
-def get_nearest_neighbors(model, dataset, latents=None, n_neighbors=50):
+def get_nearest_neighbors(
+    model: nn.Module,
+    dataset: Dataset,
+    latents: Optional[np.ndarray] = None,
+    n_neighbors: int = 50
+) -> Tuple[NearestNeighbors, np.ndarray, np.ndarray]:
     """
-    Computes nearest neighbors in the latent space of a model for a given dataset.
-    Args:
-        model (torch.nn.Module): Trained model with latent space.
-        dataset (torch.utils.data.Dataset): Dataset to extract latent vectors from.
-        latents (np.ndarray or None): Precomputed latent vectors (optional).
-        n_neighbors (int): Number of neighbors to find.
-    Returns:
-        tuple: (NearestNeighbors object, latent vectors as np.ndarray)
+    Fit a NearestNeighbors model to the latent vectors of a dataset, optionally using provided latents.
+    Returns the NearestNeighbors model, latent vectors, and functional group labels.
     """
     model.eval()
     if latents is None:
-        latents = []
-        fg_labels = []
+        latents_list: List[torch.Tensor] = []
+        fg_labels_list: List[torch.Tensor] = []
         with torch.no_grad():
             for x, fg, _ in DataLoader(dataset, batch_size=64, shuffle=False):
                 _, mu, _ = model(x)
-                latents.append(mu.cpu())
-                fg_labels.append(fg.cpu())
-        latents = torch.cat(latents).numpy()
-        fg_labels = torch.cat(fg_labels).numpy()
+                latents_list.append(mu.cpu())
+                fg_labels_list.append(fg.cpu())
+        latents = torch.cat(latents_list).numpy()
+        fg_labels = torch.cat(fg_labels_list).numpy()
+    else:
+        fg_labels = np.array([])
 
     nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='auto').fit(latents)
     return nbrs, latents, fg_labels
 
-def find_nearest_neighbors(nbrs, query_latent, n_neighbors=50):
+def find_nearest_neighbors(
+    nbrs: NearestNeighbors,
+    query_latent: np.ndarray,
+    n_neighbors: int = 50
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Finds the nearest neighbors for a given latent vector using a fitted NearestNeighbors object.
-    Args:
-        nbrs (NearestNeighbors): Fitted NearestNeighbors object.
-        query_latent (np.ndarray): Latent vector to query.
-        n_neighbors (int): Number of neighbors to retrieve.
-    Returns:
-        tuple: (distances, indices) of nearest neighbors.
+    Find the nearest neighbors for a query latent vector using a fitted NearestNeighbors model.
+    Returns distances and indices of neighbors.
     """
     distances, indices = nbrs.kneighbors(query_latent.reshape(1, -1), n_neighbors=n_neighbors)
     return distances.flatten(), indices.flatten()
 
-def get_fg_counts(dataset, fg_col='fg_array'):
+def get_fg_counts(
+    dataset: Dataset,
+    fg_col: str = 'fg_array'
+) -> np.ndarray:
     """
-    Calculates the normalized counts (prevalence) of each functional group in the dataset.
-    Args:
-        dataset (torch.utils.data.Dataset): Dataset containing functional group arrays.
-        fg_col (str): Column name for functional group arrays.
-    Returns:
-        np.ndarray: Array of normalized counts for each functional group.
+    Calculate the normalized counts of each functional group in the dataset.
     """
     df = dataset.data
     fg_list = df[fg_col].tolist()
-    fg_counts = {i: 0 for i in range(len(fg_list[0]))}
+    fg_counts: Dict[int, int] = {i: 0 for i in range(len(fg_list[0]))}
     for fg in fg_list:
         for i, val in enumerate(fg):
             if val == 1:
                 fg_counts[i] += 1
-    fg_counts = np.array(list(fg_counts.values()))
-    fg_counts = fg_counts.astype(float)
-    return fg_counts / len(fg_list)
+    fg_counts_arr = np.array(list(fg_counts.values()), dtype=float)
+    return fg_counts_arr / len(fg_list)
 
-def metric(nbrs, dataset, query_index, latent, fg_counts, fg_col='fg_array', fg_indicies=[0, 1, 2, 3], n_neighbors=50):
+def weighted_tanimoto(
+    fg_a: np.ndarray,
+    fg_b: np.ndarray,
+    weights: np.ndarray
+) -> float:
     """
-    Calculates the percentage of nearest neighbors sharing the same functional group(s) as the query,
-    normalized by the prevalence of those groups in the dataset.
-    Args:
-        nbrs (NearestNeighbors): Fitted NearestNeighbors object.
-        dataset (torch.utils.data.Dataset): Dataset containing functional group arrays.
-        query_index (int): Index of the query sample.
-        latent (np.ndarray): Array of latent vectors.
-        fg_counts (np.ndarray): Prevalence of each functional group.
-        fg_col (str): Column name for functional group arrays.
-        fg_indicies (list): Indices of functional groups to consider.
-        n_neighbors (int): Number of neighbors to use.
-    Returns:
-        float: Normalized percentage of neighbors with the same functional group(s).
+    Compute the weighted Tanimoto similarity between two binary arrays, using provided weights.
     """
-    query_fg = dataset.data.iloc[query_index][fg_col]
+    intersection = np.sum(weights * (fg_a * fg_b))
+    union = np.sum(weights * ((fg_a + fg_b) > 0))
+    return intersection / union if union > 0 else 0.0
+
+def metric(
+    nbrs: NearestNeighbors,
+    dataset: Dataset,
+    query_index: int,
+    latent: np.ndarray,
+    fg_counts: np.ndarray,
+    fg_col: str = 'fg_array',
+    n_neighbors: int = 50
+) -> float:
+    """
+    Combined metric: Weighted Tanimoto similarity normalized by expected random similarity.
+    """
+    query_fg = dataset.data.iloc[query_index][fg_col]  # np.ndarray
     distances, indices = find_nearest_neighbors(nbrs, latent[query_index], n_neighbors)
 
-    same_fg_count = 0
-    for idx in indices:
-        neighbor_fg = dataset.data.iloc[idx][fg_col]
-        if any(neighbor_fg[fg_idx] == query_fg[fg_idx] == 1 for fg_idx in fg_indicies):
-            same_fg_count += 1
-    
-    fg_prevalence = np.mean([fg_counts[fg_idx] for fg_idx in fg_indicies if query_fg[fg_idx] == 1])
-    if fg_prevalence == 0:
-        return 0.0
+    # Inverse prevalence weights (avoid division by zero)
+    weights = 1.0 / (fg_counts + 1e-8)
+    weights /= np.sum(weights)
 
-    same_fg_percentage = (same_fg_count / n_neighbors) / fg_prevalence
-    return same_fg_percentage
+    tanimoto_scores = np.zeros(len(indices), dtype=float)
+    for i, idx in enumerate(indices):
+        neighbor_fg = dataset.data.iloc[idx][fg_col]
+        tanimoto_scores[i] = weighted_tanimoto(query_fg, neighbor_fg, weights)
+
+    avg_weighted_tanimoto = np.mean(tanimoto_scores) if len(tanimoto_scores) > 0 else 0.0
+
+    return avg_weighted_tanimoto #  [1,0,0,1]
+
+def save_model(model, output_dir, model_name):
+    """Saves a given model to output directory"""
+    # Save the trained model
+    if not os.path.exists(f'{output_dir}'):
+        os.makedirs(f'{output_dir}')
+    torch.save(model.state_dict(), f'{output_dir}/{model_name}_vae_model.pth')
+    print(f"{model_name} model trained and saved as '{output_dir}/{model_name}_vae_model.pth'")
