@@ -7,6 +7,8 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 import pytorch_lightning as L
 import torch
+from scipy import sparse
+import ast
 
 
 # -------- Base MODEL --------
@@ -556,7 +558,26 @@ if __name__ == "__main__":
     MODEL_OUTPUT = 'models'
     full_dataset = pd.read_csv('data/chembl_35_fg_full.csv')
 
-    test_conversion(full_dataset['fingerprint_array'].iloc[0])
+    # Parse strings back to lists
+    for col in ['fg_data_values', 'fg_indices', 'fg_indptr', 'fp_data_values', 'fp_indices', 'fp_indptr']:
+        full_dataset[col] = full_dataset[col].apply(ast.literal_eval)
+
+    # Reconstruct dense arrays
+    full_dataset['fg_array'] = full_dataset.apply(
+        lambda row: sparse.csr_matrix(
+            (row['fg_data_values'], row['fg_indices'], row['fg_indptr']),
+            shape=(1, row['fg_length'])
+        ).toarray().flatten(),
+        axis=1
+    )
+
+    full_dataset['fingerprint_array'] = full_dataset.apply(
+        lambda row: sparse.csr_matrix(
+            (row['fp_data_values'], row['fp_indices'], row['fp_indptr']),
+            shape=(1, row['fp_length'])
+        ).toarray().flatten(),
+        axis=1
+    )
 
     # Convert fingerprint to numpy array
     full_dataset['fingerprint_array'] = full_dataset['fingerprint_array'].apply(

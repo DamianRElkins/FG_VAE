@@ -130,7 +130,7 @@ dmypy.json
 
 # Machine Learning specific
 # Datasets
-data/
+fg_*/
 datasets/
 *chunks/
 *_chunks/
@@ -204,3 +204,4 @@ temp/
 *.temp
 chembl_35_fg_scaf_curated.csv
 chembl_35_fg_scaf.csv
+chembl_35_fg_full.csv
