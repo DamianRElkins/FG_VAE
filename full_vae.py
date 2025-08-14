@@ -549,12 +549,9 @@ def test_conversion(s):
         print(f"Error during conversion: {e}")
         return np.zeros(1) # Return a placeholder to prevent crashes
 
-# Re-run the data loading part with the test function
-full_dataset = pd.read_csv('data/chembl_35_fg_full.csv')
-full_dataset['fingerprint_array'] = full_dataset['fingerprint_array'].apply(test_conversion)
 
 if __name__ == "__main__":
-    MODELS = [None]
+    MODELS = ['Base', 'CVAE', 'CSVAE']
     MODEL_OUTPUT = 'models'
     full_dataset = pd.read_csv('data/chembl_35_fg_full.csv')
 
@@ -592,7 +589,7 @@ if __name__ == "__main__":
 
     torch.manual_seed(42)  # For reproducibility
 
-    latent_dim = 64  # Example latent dimension
+    latent_dim = 32  # Example latent dimension
     encoder_hidden_dims = [1024, 512, 256, 128]  # Example encoder hidden layers
     decoder_hidden_dims = [128, 256, 1024]  # Example decoder hidden layers
     latent_dim_z = 32 # for CSVAE
