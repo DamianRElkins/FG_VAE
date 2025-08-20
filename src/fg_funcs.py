@@ -3,7 +3,7 @@ from rdkit.Chem import AllChem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 import os
 import pickle
-import efgs
+import .efgs
 from rdkit.Chem import rdFingerprintGenerator
 import numpy as np
 from rdkit import DataStructs
