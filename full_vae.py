@@ -395,7 +395,7 @@ class ConditionalSubspaceVAETrainer(L.LightningModule):
         self.beta1 = beta1
         self.beta2 = beta2
         self.beta3 = beta3
-        self.reconstruction_loss_func = nn.BCELoss(reduction='sum')
+        self.reconstruction_loss_func = nn.BCELoss(reduction='mean')
         self.adversarial_loss_func = nn.BCELoss(reduction='mean')
 
     def forward(self, x, fg):
@@ -404,53 +404,46 @@ class ConditionalSubspaceVAETrainer(L.LightningModule):
     def training_step(self, batch, batch_idx):
         opt_vae, opt_adv = self.optimizers()
         x, fg, _ = batch
-        
-        # --- VAE Training Step ---
-        # Get forward pass outputs
+
         recon_x, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
-        
-        # M1: VAE reconstruction and KL divergence losses
-        recon_loss = self.reconstruction_loss_func(recon_x, x)
-        kld_z = -0.5 * torch.sum(1 + log_var_z - mu_z.pow(2) - log_var_z.exp())
-        kld_w = -0.5 * torch.sum(1 + log_var_w - mu_w.pow(2) - log_var_w.exp())
+        z = self.model.reparameterize(mu_z, log_var_z)
+
+        # ----- losses (use means) -----
+        recon_loss = self.reconstruction_loss_func(recon_x, x)  # mean
+        kld_z = -0.5 * (1 + log_var_z - mu_z.pow(2) - log_var_z.exp()).mean()
+        kld_w = -0.5 * (1 + log_var_w - mu_w.pow(2) - log_var_w.exp()).mean()
         vae_loss_val = recon_loss + kld_z + kld_w
 
-        # M2: Adversarial loss for VAE (to fool the classifier)
-        # We want to minimize the negative conditional entropy.
-        m2_loss = torch.sum(fg_pred * torch.log(fg_pred + 1e-10), dim=1).mean()
+        # M2: maximize entropy => minimize (-H) for Bernoulli dims
+        eps = 1e-10
+        bernoulli_negH = (fg_pred * torch.log(fg_pred + eps) + (1 - fg_pred) * torch.log(1 - fg_pred + eps)).mean()
+        m2_loss = bernoulli_negH  # this is -H
+
         total_vae_loss = self.beta1 * vae_loss_val + self.beta2 * m2_loss
 
-        # Manually optimize the VAE. Retain the graph for the adversarial step.
+        # ----- VAE step -----
         opt_vae.zero_grad()
-        self.manual_backward(total_vae_loss, retain_graph=True)
+        self.manual_backward(total_vae_loss) 
         opt_vae.step()
-        
-        # --- Adversarial Network Training Step ---
-        # Get the latest latent variable z and detach it from the VAE's graph
-        # This prevents gradients from flowing back into the VAE when training the adversarial network
-        _, _, mu_z, _, _, _ = self(x, fg)
-        z = self.model.reparameterize(mu_z, log_var_z)
-        z_detached = z.detach()
-        
-        # Get the adversarial network prediction using the detached latent variable
-        fg_pred_adv = self.model.classify_z(z_detached)
 
-        # N: Adversarial loss for the classifier (to correctly classify)
+        # ----- adversary step (detach z) -----
+        z_detached = z.detach()
+        fg_pred_adv = self.model.classify_z(z_detached)
         n_loss = self.adversarial_loss_func(fg_pred_adv, fg)
         total_adv_loss = self.beta3 * n_loss
 
-        # Manually optimize the adversarial network
         opt_adv.zero_grad()
         self.manual_backward(total_adv_loss)
         opt_adv.step()
 
-        # Log metrics
-        self.log('train_vae_loss', total_vae_loss, on_step=False, on_epoch=True)
-        self.log('train_recon_loss', recon_loss, on_step=False, on_epoch=True)
-        self.log('train_kld_z', kld_z, on_step=False, on_epoch=True)
-        self.log('train_kld_w', kld_w, on_step=False, on_epoch=True)
-        self.log('train_m2_loss', m2_loss, on_step=False, on_epoch=True)
-        self.log('train_adv_loss', total_adv_loss, on_step=False, on_epoch=True)
+        # logs
+        self.log('train_total_vae', total_vae_loss, on_epoch=True)
+        self.log('train_recon', recon_loss, on_epoch=True)
+        self.log('train_kld_z', kld_z, on_epoch=True)
+        self.log('train_kld_w', kld_w, on_epoch=True)
+        self.log('train_m2_negH', m2_loss, on_epoch=True)
+        self.log('train_adv', total_adv_loss, on_epoch=True)
+
 
     def validation_step(self, batch, batch_idx):
         x, fg, _ = batch
@@ -523,6 +516,261 @@ def train_conditional_subspace_vae(dataset, fingerprint_dim, fg_dim, latent_dim_
     trainer.test(model, test_loader)
     return model
 
+# -------- DISCoVeR Model --------
+class DiscoverVAE(L.LightningModule):
+    def __init__(self, fingerprint_dim, fg_dim, latent_dim_z, latent_dim_w, encoder_hidden_dims_z, encoder_hidden_dims_w, decoder_hidden_dims, decoder_z_hidden_dims, adversarial_hidden_dims):
+        super(DiscoverVAE, self).__init__()
+        self.fingerprint_dim = fingerprint_dim
+        self.fg_dim = fg_dim
+        self.latent_dim_z = latent_dim_z
+        self.latent_dim_w = latent_dim_w
+
+        # Encoder for latent space Z (only depends on x)
+        encoder_z_layers = []
+        prev_dim = fingerprint_dim
+        for h_dim in encoder_hidden_dims_z:
+            encoder_z_layers.append(nn.Linear(prev_dim, h_dim))
+            encoder_z_layers.append(nn.LayerNorm(h_dim))
+            encoder_z_layers.append(nn.ReLU())
+            encoder_z_layers.append(nn.Dropout(0.1))
+            prev_dim = h_dim
+        encoder_z_layers.append(nn.Linear(prev_dim, latent_dim_z * 2))
+        self.encoder_z = nn.Sequential(*encoder_z_layers)
+
+        # Encoder for latent space W (depends on x and y)
+        encoder_w_layers = []
+        prev_dim = fingerprint_dim + fg_dim
+        for h_dim in encoder_hidden_dims_w:
+            encoder_w_layers.append(nn.Linear(prev_dim, h_dim))
+            encoder_w_layers.append(nn.LayerNorm(h_dim))
+            encoder_w_layers.append(nn.ReLU())
+            encoder_w_layers.append(nn.Dropout(0.1))
+            prev_dim = h_dim
+        encoder_w_layers.append(nn.Linear(prev_dim, latent_dim_w * 2))
+        self.encoder_w = nn.Sequential(*encoder_w_layers)
+
+        # Decoder 1 (full reconstruction, depends on z and w)
+        decoder_layers = []
+        prev_dim = latent_dim_z + latent_dim_w
+        for h_dim in decoder_hidden_dims:
+            decoder_layers.append(nn.Linear(prev_dim, h_dim))
+            decoder_layers.append(nn.ReLU())
+            decoder_layers.append(nn.Dropout(0.1))
+            prev_dim = h_dim
+        decoder_layers.append(nn.Linear(prev_dim, fingerprint_dim))
+        decoder_layers.append(nn.Sigmoid())
+        self.decoder = nn.Sequential(*decoder_layers)
+
+        # Decoder 2 (lightweight reconstruction, depends on z only)
+        decoder_z_layers = []
+        prev_dim = latent_dim_z
+        for h_dim in decoder_z_hidden_dims:
+            decoder_z_layers.append(nn.Linear(prev_dim, h_dim))
+            decoder_z_layers.append(nn.ReLU())
+            decoder_z_layers.append(nn.Dropout(0.1))
+            prev_dim = h_dim
+        decoder_z_layers.append(nn.Linear(prev_dim, fingerprint_dim))
+        decoder_z_layers.append(nn.Sigmoid())
+        self.decoder_z = nn.Sequential(*decoder_z_layers)
+
+        # Adversarial Network (classifier) to predict y from z
+        adversarial_layers = []
+        prev_dim = latent_dim_z
+        for h_dim in adversarial_hidden_dims:
+            adversarial_layers.append(nn.Linear(prev_dim, h_dim))
+            adversarial_layers.append(nn.ReLU())
+            adversarial_layers.append(nn.Dropout(0.1))
+            prev_dim = h_dim
+        adversarial_layers.append(nn.Linear(prev_dim, fg_dim))
+        adversarial_layers.append(nn.Sigmoid())
+        self.adversarial_network = nn.Sequential(*adversarial_layers)
+
+
+    def encode(self, x, fg):
+        mu_z, log_var_z = self.encoder_z(x).chunk(2, dim=-1)
+        mu_w, log_var_w = self.encoder_w(torch.cat([x, fg], dim=-1)).chunk(2, dim=-1)
+        return mu_z, log_var_z, mu_w, log_var_w
+
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z, w):
+        return self.decoder(torch.cat([z, w], dim=-1))
+
+    def decode_z(self, z):
+        return self.decoder_z(z)
+
+    def classify_z(self, z):
+        return self.adversarial_network(z)
+
+    def forward(self, x, fg):
+        mu_z, log_var_z, mu_w, log_var_w = self.encode(x, fg)
+        z = self.reparameterize(mu_z, log_var_z)
+        w = self.reparameterize(mu_w, log_var_w)
+        recon_x_full = self.decode(z, w)
+        recon_x_z = self.decode_z(z)
+        fg_pred = self.classify_z(z)
+        return recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w
+
+
+# -------- DISCoVeR Trainer --------
+class DiscoverVAETrainer(L.LightningModule):
+    def __init__(self, fingerprint_dim, fg_dim, latent_dim_z, latent_dim_w, encoder_hidden_dims_z, encoder_hidden_dims_w, decoder_hidden_dims, decoder_z_hidden_dims, adversarial_hidden_dims, learning_rate, beta1=0.9, beta2=0.0001, beta3=0.0001, beta4=100, beta5=0.1):
+        super().__init__()
+        self.save_hyperparameters()
+        self.automatic_optimization = False
+        self.model = DiscoverVAE(
+            fingerprint_dim=fingerprint_dim,
+            fg_dim=fg_dim,
+            latent_dim_z=latent_dim_z,
+            latent_dim_w=latent_dim_w,
+            encoder_hidden_dims_z=encoder_hidden_dims_z,
+            encoder_hidden_dims_w=encoder_hidden_dims_w,
+            decoder_hidden_dims=decoder_hidden_dims,
+            decoder_z_hidden_dims=decoder_z_hidden_dims,
+            adversarial_hidden_dims=adversarial_hidden_dims
+        )
+        self.learning_rate = learning_rate
+        self.rec_w = beta1
+        self.kld_z_w = beta2
+        self.kld_w_w = beta3
+        self.adv_w = beta4
+        self.rec_z_w = beta5
+
+        self.reconstruction_loss_func = nn.BCELoss(reduction='mean')
+        self.adversarial_loss_func = nn.BCELoss(reduction='mean')
+
+    def forward(self, x, fg):
+        return self.model(x, fg)
+
+    def training_step(self, batch, batch_idx):
+        opt_vae, opt_adv = self.optimizers()
+        x, fg, _ = batch
+
+        recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
+        z = self.model.reparameterize(mu_z, log_var_z)
+
+        # ----- VAE losses (main step) -----
+        recon_loss_full = self.reconstruction_loss_func(recon_x_full, x)
+        recon_loss_z = self.reconstruction_loss_func(recon_x_z, x)
+        kld_z = -0.5 * (1 + log_var_z - mu_z.pow(2) - log_var_z.exp()).mean()
+        kld_w = -0.5 * (1 + log_var_w - mu_w.pow(2) - log_var_w.exp()).mean()
+
+        # M2: maximize entropy => minimize (-H) for Bernoulli dims
+        neg_adv_loss = -self.adversarial_loss_func(fg_pred, fg)
+
+        total_vae_loss = (self.rec_w * recon_loss_full + 
+                          self.kld_z_w * kld_z + 
+                          self.kld_w_w * kld_w +
+                          self.adv_w * neg_adv_loss + 
+                          self.rec_z_w * recon_loss_z)
+
+
+        # ----- VAE step -----
+        opt_vae.zero_grad()
+        self.manual_backward(total_vae_loss) 
+        opt_vae.step()
+
+        # ----- Adversary step (detach z) -----
+        z_detached = z.detach()
+        fg_pred_adv = self.model.classify_z(z_detached)
+        adv_loss_val = self.adversarial_loss_func(fg_pred_adv, fg)
+
+        opt_adv.zero_grad()
+        self.manual_backward(adv_loss_val)
+        opt_adv.step()
+
+        # logs
+        self.log('train_total_vae', total_vae_loss, on_epoch=True)
+        self.log('train_recon_full', recon_loss_full, on_epoch=True)
+        self.log('train_recon_z', recon_loss_z, on_epoch=True)
+        self.log('train_kld_z', kld_z, on_epoch=True)
+        self.log('train_kld_w', kld_w, on_epoch=True)
+        self.log('train_adv_vae', neg_adv_loss, on_epoch=True)
+        self.log('train_adv_disc', adv_loss_val, on_epoch=True)
+
+
+    def validation_step(self, batch, batch_idx):
+        x, fg, _ = batch
+        recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
+        recon_loss_full = self.reconstruction_loss_func(recon_x_full, x)
+        recon_loss_z = self.reconstruction_loss_func(recon_x_z, x)
+        kld_z = -0.5 * torch.sum(1 + log_var_z - mu_z.pow(2) - log_var_z.exp())
+        kld_w = -0.5 * torch.sum(1 + log_var_w - mu_w.pow(2) - log_var_w.exp())
+        adv_loss_val = self.adversarial_loss_func(fg_pred, fg)
+        total_loss = self.rec_w * recon_loss_full + self.kld_z_w * kld_z + self.kld_w_w * kld_w + self.rec_z_w * recon_loss_z + self.adv_w * adv_loss_val
+        
+        self.log('val_total_loss', total_loss, on_epoch=True, prog_bar=True)
+        self.log('val_recon_full', recon_loss_full, on_epoch=True)
+        self.log('val_recon_z', recon_loss_z, on_epoch=True)
+        self.log('val_kld_z', kld_z, on_epoch=True)
+        self.log('val_kld_w', kld_w, on_epoch=True)
+        self.log('val_adv_disc', adv_loss_val, on_epoch=True)
+        return total_loss
+    
+    def test_step(self, batch, batch_idx):
+        x, fg, _ = batch
+        recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
+        recon_loss_full = self.reconstruction_loss_func(recon_x_full, x)
+        recon_loss_z = self.reconstruction_loss_func(recon_x_z, x)
+        kld_z = -0.5 * torch.sum(1 + log_var_z - mu_z.pow(2) - log_var_z.exp())
+        kld_w = -0.5 * torch.sum(1 + log_var_w - mu_w.pow(2) - log_var_w.exp())
+        adv_loss_val = self.adversarial_loss_func(fg_pred, fg)
+        total_loss = self.rec_w * recon_loss_full + self.kld_z_w * kld_z + self.kld_w_w * kld_w + self.rec_z_w * recon_loss_z + self.adv_w * adv_loss_val
+        
+        self.log('test_total_loss', total_loss, on_epoch=True, prog_bar=True)
+        self.log('test_recon_full', recon_loss_full, on_epoch=True)
+        self.log('test_recon_z', recon_loss_z, on_epoch=True)
+        self.log('test_kld_z', kld_z, on_epoch=True)
+        self.log('test_kld_w', kld_w, on_epoch=True)
+        self.log('test_adv_disc', adv_loss_val, on_epoch=True)
+        return total_loss
+
+    def configure_optimizers(self):
+        optimizer_vae = optim.Adam(
+            list(self.model.encoder_z.parameters()) +
+            list(self.model.encoder_w.parameters()) +
+            list(self.model.decoder.parameters()) +
+            list(self.model.decoder_z.parameters()),
+            lr=self.learning_rate
+        )
+        optimizer_adv = optim.Adam(
+            self.model.adversarial_network.parameters(),
+            lr=self.learning_rate
+        )
+        return [optimizer_vae, optimizer_adv]
+
+
+# -------- DISCoVeR Training Function --------
+def train_discover_vae(dataset, fingerprint_dim, fg_dim, latent_dim_z, latent_dim_w, encoder_hidden_dims_z, encoder_hidden_dims_w, decoder_hidden_dims, decoder_z_hidden_dims, adversarial_hidden_dims, batch_size=64, learning_rate=1e-3, max_epochs=50):
+    train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=42)
+    val_data, test_data = train_test_split(test_data, test_size=0.2, random_state=42)
+    train_dataset = FingerprintDataset(train_data)
+    val_dataset = FingerprintDataset(val_data)
+    test_dataset = FingerprintDataset(test_data)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    model = DiscoverVAETrainer(
+        fingerprint_dim=fingerprint_dim,
+        fg_dim=fg_dim,
+        latent_dim_z=latent_dim_z,
+        latent_dim_w=latent_dim_w,
+        encoder_hidden_dims_z=encoder_hidden_dims_z,
+        encoder_hidden_dims_w=encoder_hidden_dims_w,
+        decoder_hidden_dims=decoder_hidden_dims,
+        decoder_z_hidden_dims=decoder_z_hidden_dims,
+        adversarial_hidden_dims=adversarial_hidden_dims,
+        learning_rate=learning_rate
+    )
+    wandb_logger = WandbLogger(project='fg_discover_vae', log_model=True)
+    trainer = L.Trainer(max_epochs=max_epochs, val_check_interval=0.5, logger=wandb_logger)
+    trainer.fit(model, train_loader, val_loader)
+    trainer.test(model, test_loader)
+    return model
+
 # Create a test function to inspect the conversion
 def test_conversion(s):
     print(f"Original string: '{s}'")
@@ -551,7 +799,7 @@ def test_conversion(s):
 
 
 if __name__ == "__main__":
-    MODELS = ['Base', 'CVAE', 'CSVAE']
+    MODELS = ['DISCoVeR']
     MODEL_OUTPUT = 'models'
     full_dataset = pd.read_csv('data/chembl_35_fg_full.csv')
 
@@ -592,6 +840,7 @@ if __name__ == "__main__":
     latent_dim = 32  # Example latent dimension
     encoder_hidden_dims = [1024, 512, 256, 128]  # Example encoder hidden layers
     decoder_hidden_dims = [128, 256, 1024]  # Example decoder hidden layers
+    decoder_z_hidden_dims = [128, 256, 1024]  # Decoder layers for DISCoVeR
     latent_dim_z = 32 # for CSVAE
     latent_dim_w = 32 # for CSVAE
     encoder_hidden_dims_z = [1024, 512, 256, 128] # for CSVAE
@@ -660,6 +909,23 @@ if __name__ == "__main__":
                 )
                 save_model(vae_trainer, MODEL_OUTPUT, MODEL)
 
-    
-    
-    
+        elif MODEL == 'DISCoVeR':
+                print("Training DISCoVeR VAE model...")
+                fingerprint_dim = len(full_dataset['fingerprint_array'].iloc[0])
+                fg_dim = len(full_dataset['fg_array'].iloc[0])
+                vae_trainer = train_discover_vae(
+                    dataset=full_dataset,
+                    fingerprint_dim=fingerprint_dim,
+                    fg_dim=fg_dim,
+                    latent_dim_z=latent_dim_z,
+                    latent_dim_w=latent_dim_w,
+                    encoder_hidden_dims_z=encoder_hidden_dims_z,
+                    encoder_hidden_dims_w=encoder_hidden_dims_w,
+                    decoder_hidden_dims=decoder_hidden_dims,
+                    decoder_z_hidden_dims=decoder_z_hidden_dims,
+                    adversarial_hidden_dims=adversarial_hidden_dims,
+                    batch_size=batch_size,
+                    learning_rate=learning_rate,
+                    max_epochs=max_epochs
+                )
+                save_model(vae_trainer, MODEL_OUTPUT, MODEL)
