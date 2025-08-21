@@ -157,9 +157,9 @@ def train_base_model(dataset, input_dim, latent_dim, fg_dim, encoder_hidden_dims
     test_dataset = FingerprintDataset(test_data)
 
     # Create data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=4)
 
     # Initialize model
     model = BaseVAETrainer(
@@ -293,9 +293,9 @@ def train_conditional_vae(dataset, fingerprint_dim, fg_dim, latent_dim, encoder_
     train_dataset = FingerprintDataset(train_data)
     val_dataset = FingerprintDataset(val_data)
     test_dataset = FingerprintDataset(test_data)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=4)
 
     # Initialize model
     model = ConditionalVAETrainer(
@@ -519,9 +519,9 @@ def train_conditional_subspace_vae(dataset, fingerprint_dim, fg_dim, latent_dim_
     train_dataset = FingerprintDataset(train_data)
     val_dataset = FingerprintDataset(val_data)
     test_dataset = FingerprintDataset(test_data)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=4)
     model = ConditionalSubspaceVAETrainer(
         fingerprint_dim=fingerprint_dim,
         fg_dim=fg_dim,
@@ -772,9 +772,9 @@ def train_discover_vae(dataset, fingerprint_dim, fg_dim, latent_dim_z, latent_di
     train_dataset = FingerprintDataset(train_data)
     val_dataset = FingerprintDataset(val_data)
     test_dataset = FingerprintDataset(test_data)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, num_workers=4)
     model = DiscoverVAETrainer(
         fingerprint_dim=fingerprint_dim,
         fg_dim=fg_dim,
