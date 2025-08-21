@@ -1,14 +1,15 @@
+import gc
 from fg_funcs import vae_loss, save_model
 import pandas as pd
-import numpy as np
 from sklearn.model_selection import train_test_split
 from pytorch_lightning.loggers import WandbLogger
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import pytorch_lightning as L
 import torch
 from scipy import sparse
 import ast
+
 
 
 # -------- Base MODEL --------
@@ -57,20 +58,42 @@ class BaseVAE(L.LightningModule):
         z = self.reparameterize(mu, log_var)
         return self.decode(z), mu, log_var
     
-# -------- Dataset --------
-class FingerprintDataset(torch.utils.data.Dataset):
-    def __init__(self, data, fingerprint_col='fingerprint_array', fg_col='fg_array'):
-        self.data = data
-        self.fingerprint_col = fingerprint_col
-        self.fg_col = fg_col
+class FingerprintDataset(Dataset):
+    def __init__(self, df):
+        # Store the DataFrame directly. It now only contains sparse data columns.
+        self.df = df
 
     def __len__(self):
-        return len(self.data)
+        return len(self.df)
 
     def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-        fingerprint = torch.tensor(row[self.fingerprint_col], dtype=torch.float32)
-        fg_vector = torch.tensor(row[self.fg_col], dtype=torch.float32)
+        row = self.df.iloc[idx]
+
+        # Parse string representations back to lists for the current row
+        fg_data_values = ast.literal_eval(row['fg_data_values'])
+        fg_indices = ast.literal_eval(row['fg_indices'])
+        fg_indptr = ast.literal_eval(row['fg_indptr'])
+        
+        fp_data_values = ast.literal_eval(row['fp_data_values'])
+        fp_indices = ast.literal_eval(row['fp_indices'])
+        fp_indptr = ast.literal_eval(row['fp_indptr'])
+
+        # Reconstruct sparse matrix and convert to dense array for the current row
+        fg_array = sparse.csr_matrix(
+            (fg_data_values, fg_indices, fg_indptr),
+            shape=(1, row['fg_length'])
+        ).toarray().flatten()
+
+        fingerprint_array = sparse.csr_matrix(
+            (fp_data_values, fp_indices, fp_indptr),
+            shape=(1, row['fp_length'])
+        ).toarray().flatten()
+
+        # Convert to tensors
+        fingerprint = torch.tensor(fingerprint_array, dtype=torch.float32)
+        fg_vector = torch.tensor(fg_array, dtype=torch.float32)
+        
+        # You may not need the original index, but it's fine to keep it
         return fingerprint, fg_vector, idx
     
 
@@ -122,8 +145,8 @@ class BaseVAETrainer(L.LightningModule):
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=self.learning_rate)
 
-# -------- Base Model Trainign Function --------   
-def train_base_model(dataset, input_dim, latent_dim, encoder_hidden_dims, decoder_hidden_dims, batch_size=64, learning_rate=1e-3, max_epochs=50):
+# -------- Base Model Training Function --------
+def train_base_model(dataset, input_dim, latent_dim, fg_dim, encoder_hidden_dims, decoder_hidden_dims, batch_size=64, learning_rate=1e-3, max_epochs=50):
     # Split dataset into train, validation, and test sets
     train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=42)
     val_data, test_data = train_test_split(test_data, test_size=0.5, random_state=42)
@@ -148,7 +171,7 @@ def train_base_model(dataset, input_dim, latent_dim, encoder_hidden_dims, decode
     )
 
     # Initialize Wandb logger
-    wandb_logger = WandbLogger(project='fg_vae', log_model=True)
+    wandb_logger = WandbLogger(project=f'fg_vae_{fg_dim}', log_model=True)
 
     # Train the model
     trainer = L.Trainer(max_epochs=max_epochs, val_check_interval=0.5, logger=wandb_logger)
@@ -285,7 +308,7 @@ def train_conditional_vae(dataset, fingerprint_dim, fg_dim, latent_dim, encoder_
     )
 
     # WandB logger
-    wandb_logger = WandbLogger(project='fg_cvae', log_model=True)
+    wandb_logger = WandbLogger(project=f'fg_cvae_{fg_dim}', log_model=True)
 
     # Trainer
     trainer = L.Trainer(max_epochs=max_epochs, val_check_interval=0.5, logger=wandb_logger)
@@ -375,7 +398,7 @@ class ConditionalSubspaceVAE(L.LightningModule):
         fg_pred = self.classify_z(z)
         return recon_x, fg_pred, mu_z, log_var_z, mu_w, log_var_w
 
-# -------- CSVAE Trainer (Paper-aligned implementation) --------
+# -------- CSVAE Trainer --------
 class ConditionalSubspaceVAETrainer(L.LightningModule):
     def __init__(self, fingerprint_dim, fg_dim, latent_dim_z, latent_dim_w, encoder_hidden_dims_z, encoder_hidden_dims_w, decoder_hidden_dims, adversarial_hidden_dims, learning_rate, beta1=1.0, beta2=1.0, beta3=1.0):
         super().__init__()
@@ -510,7 +533,7 @@ def train_conditional_subspace_vae(dataset, fingerprint_dim, fg_dim, latent_dim_
         adversarial_hidden_dims=adversarial_hidden_dims,
         learning_rate=learning_rate
     )
-    wandb_logger = WandbLogger(project='fg_csvae_paper', log_model=True)
+    wandb_logger = WandbLogger(project=f'fg_csvae_{fg_dim}', log_model=True)
     trainer = L.Trainer(max_epochs=max_epochs, val_check_interval=0.5, logger=wandb_logger)
     trainer.fit(model, train_loader, val_loader)
     trainer.test(model, test_loader)
@@ -575,7 +598,7 @@ class DiscoverVAE(L.LightningModule):
 
         # Adversarial Network (classifier) to predict y from z
         adversarial_layers = []
-        prev_dim = latent_dim_z
+        prev_dim = fingerprint_dim
         for h_dim in adversarial_hidden_dims:
             adversarial_layers.append(nn.Linear(prev_dim, h_dim))
             adversarial_layers.append(nn.ReLU())
@@ -602,22 +625,22 @@ class DiscoverVAE(L.LightningModule):
     def decode_z(self, z):
         return self.decoder_z(z)
 
-    def classify_z(self, z):
-        return self.adversarial_network(z)
+    def classify_x_hat(self, x_hat):
+        return self.adversarial_network(x_hat)
 
     def forward(self, x, fg):
         mu_z, log_var_z, mu_w, log_var_w = self.encode(x, fg)
         z = self.reparameterize(mu_z, log_var_z)
         w = self.reparameterize(mu_w, log_var_w)
         recon_x_full = self.decode(z, w)
-        recon_x_z = self.decode_z(z)
-        fg_pred = self.classify_z(z)
-        return recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w
+        recon_x_hat = self.decode_z(z)
+        fg_pred = self.classify_x_hat(recon_x_hat)
+        return recon_x_full, recon_x_hat, fg_pred, mu_z, log_var_z, mu_w, log_var_w
 
 
 # -------- DISCoVeR Trainer --------
 class DiscoverVAETrainer(L.LightningModule):
-    def __init__(self, fingerprint_dim, fg_dim, latent_dim_z, latent_dim_w, encoder_hidden_dims_z, encoder_hidden_dims_w, decoder_hidden_dims, decoder_z_hidden_dims, adversarial_hidden_dims, learning_rate, beta1=0.9, beta2=0.0001, beta3=0.0001, beta4=100, beta5=0.1):
+    def __init__(self, fingerprint_dim, fg_dim, latent_dim_z, latent_dim_w, encoder_hidden_dims_z, encoder_hidden_dims_w, decoder_hidden_dims, decoder_z_hidden_dims, adversarial_hidden_dims, learning_rate, beta1=0.7, beta2=0.7, beta3=0.2, beta4=0.8, beta5=0.3):
         super().__init__()
         self.save_hyperparameters()
         self.automatic_optimization = False
@@ -649,12 +672,11 @@ class DiscoverVAETrainer(L.LightningModule):
         opt_vae, opt_adv = self.optimizers()
         x, fg, _ = batch
 
-        recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
-        z = self.model.reparameterize(mu_z, log_var_z)
+        recon_x_full, recon_x_hat, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
 
         # ----- VAE losses (main step) -----
         recon_loss_full = self.reconstruction_loss_func(recon_x_full, x)
-        recon_loss_z = self.reconstruction_loss_func(recon_x_z, x)
+        recon_loss_hat = self.reconstruction_loss_func(recon_x_hat, x)
         kld_z = -0.5 * (1 + log_var_z - mu_z.pow(2) - log_var_z.exp()).mean()
         kld_w = -0.5 * (1 + log_var_w - mu_w.pow(2) - log_var_w.exp()).mean()
 
@@ -665,7 +687,7 @@ class DiscoverVAETrainer(L.LightningModule):
                           self.kld_z_w * kld_z + 
                           self.kld_w_w * kld_w +
                           self.adv_w * neg_adv_loss + 
-                          self.rec_z_w * recon_loss_z)
+                          self.rec_z_w * recon_loss_hat)
 
 
         # ----- VAE step -----
@@ -674,8 +696,8 @@ class DiscoverVAETrainer(L.LightningModule):
         opt_vae.step()
 
         # ----- Adversary step (detach z) -----
-        z_detached = z.detach()
-        fg_pred_adv = self.model.classify_z(z_detached)
+        rec_hat_detached = recon_x_hat.detach()
+        fg_pred_adv = self.model.classify_x_hat(rec_hat_detached)
         adv_loss_val = self.adversarial_loss_func(fg_pred_adv, fg)
 
         opt_adv.zero_grad()
@@ -685,7 +707,7 @@ class DiscoverVAETrainer(L.LightningModule):
         # logs
         self.log('train_total_vae', total_vae_loss, on_epoch=True)
         self.log('train_recon_full', recon_loss_full, on_epoch=True)
-        self.log('train_recon_z', recon_loss_z, on_epoch=True)
+        self.log('train_recon_z', recon_loss_hat, on_epoch=True)
         self.log('train_kld_z', kld_z, on_epoch=True)
         self.log('train_kld_w', kld_w, on_epoch=True)
         self.log('train_adv_vae', neg_adv_loss, on_epoch=True)
@@ -694,17 +716,17 @@ class DiscoverVAETrainer(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, fg, _ = batch
-        recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
+        recon_x_full, recon_x_hat, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
         recon_loss_full = self.reconstruction_loss_func(recon_x_full, x)
-        recon_loss_z = self.reconstruction_loss_func(recon_x_z, x)
+        recon_loss_hat = self.reconstruction_loss_func(recon_x_hat, x)
         kld_z = -0.5 * torch.sum(1 + log_var_z - mu_z.pow(2) - log_var_z.exp())
         kld_w = -0.5 * torch.sum(1 + log_var_w - mu_w.pow(2) - log_var_w.exp())
         adv_loss_val = self.adversarial_loss_func(fg_pred, fg)
-        total_loss = self.rec_w * recon_loss_full + self.kld_z_w * kld_z + self.kld_w_w * kld_w + self.rec_z_w * recon_loss_z + self.adv_w * adv_loss_val
-        
+        total_loss = self.rec_w * recon_loss_full + self.kld_z_w * kld_z + self.kld_w_w * kld_w + self.rec_z_w * recon_loss_hat + self.adv_w * adv_loss_val
+
         self.log('val_total_loss', total_loss, on_epoch=True, prog_bar=True)
         self.log('val_recon_full', recon_loss_full, on_epoch=True)
-        self.log('val_recon_z', recon_loss_z, on_epoch=True)
+        self.log('val_recon_z', recon_loss_hat, on_epoch=True)
         self.log('val_kld_z', kld_z, on_epoch=True)
         self.log('val_kld_w', kld_w, on_epoch=True)
         self.log('val_adv_disc', adv_loss_val, on_epoch=True)
@@ -712,17 +734,17 @@ class DiscoverVAETrainer(L.LightningModule):
     
     def test_step(self, batch, batch_idx):
         x, fg, _ = batch
-        recon_x_full, recon_x_z, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
+        recon_x_full, recon_x_hat, fg_pred, mu_z, log_var_z, mu_w, log_var_w = self(x, fg)
         recon_loss_full = self.reconstruction_loss_func(recon_x_full, x)
-        recon_loss_z = self.reconstruction_loss_func(recon_x_z, x)
+        recon_loss_hat = self.reconstruction_loss_func(recon_x_hat, x)
         kld_z = -0.5 * torch.sum(1 + log_var_z - mu_z.pow(2) - log_var_z.exp())
         kld_w = -0.5 * torch.sum(1 + log_var_w - mu_w.pow(2) - log_var_w.exp())
         adv_loss_val = self.adversarial_loss_func(fg_pred, fg)
-        total_loss = self.rec_w * recon_loss_full + self.kld_z_w * kld_z + self.kld_w_w * kld_w + self.rec_z_w * recon_loss_z + self.adv_w * adv_loss_val
-        
+        total_loss = self.rec_w * recon_loss_full + self.kld_z_w * kld_z + self.kld_w_w * kld_w + self.rec_z_w * recon_loss_hat + self.adv_w * adv_loss_val
+
         self.log('test_total_loss', total_loss, on_epoch=True, prog_bar=True)
         self.log('test_recon_full', recon_loss_full, on_epoch=True)
-        self.log('test_recon_z', recon_loss_z, on_epoch=True)
+        self.log('test_recon_z', recon_loss_hat, on_epoch=True)
         self.log('test_kld_z', kld_z, on_epoch=True)
         self.log('test_kld_w', kld_w, on_epoch=True)
         self.log('test_adv_disc', adv_loss_val, on_epoch=True)
@@ -765,84 +787,28 @@ def train_discover_vae(dataset, fingerprint_dim, fg_dim, latent_dim_z, latent_di
         adversarial_hidden_dims=adversarial_hidden_dims,
         learning_rate=learning_rate
     )
-    wandb_logger = WandbLogger(project='fg_discover_vae', log_model=True)
+    wandb_logger = WandbLogger(project=f'fg_discover_vae_{fg_dim}', log_model=True)
     trainer = L.Trainer(max_epochs=max_epochs, val_check_interval=0.5, logger=wandb_logger)
     trainer.fit(model, train_loader, val_loader)
     trainer.test(model, test_loader)
     return model
 
-# Create a test function to inspect the conversion
-def test_conversion(s):
-    print(f"Original string: '{s}'")
-    if not isinstance(s, str):
-        print("Input is not a string, skipping conversion.")
-        return s
-    
-    # Try the original conversion
-    try:
-        cleaned_s = s.strip('[]')
-        result = np.fromstring(cleaned_s, sep=' ')
-        print(f"Conversion result: {result}")
-        if result.size == 0 or np.all(result == 0.0):
-            print("Conversion failed. Trying alternate delimiter...")
-            
-            # Try a different delimiter, like a comma
-            cleaned_s_comma = s.strip('[]').replace(' ', ',')
-            result_comma = np.fromstring(cleaned_s_comma, sep=',')
-            print(f"Comma-separated result: {result_comma}")
-            return result_comma
-        else:
-            return result
-    except Exception as e:
-        print(f"Error during conversion: {e}")
-        return np.zeros(1) # Return a placeholder to prevent crashes
-
 
 if __name__ == "__main__":
     MODELS = ['DISCoVeR']
-    MODEL_OUTPUT = 'models'
+    MODEL_OUTPUT = 'models/large_models'
+
+    # Load the raw data from CSV 
     full_dataset = pd.read_csv('data/chembl_35_fg_full.csv')
-
-    # Parse strings back to lists
-    for col in ['fg_data_values', 'fg_indices', 'fg_indptr', 'fp_data_values', 'fp_indices', 'fp_indptr']:
-        full_dataset[col] = full_dataset[col].apply(ast.literal_eval)
-
-    # Reconstruct dense arrays
-    full_dataset['fg_array'] = full_dataset.apply(
-        lambda row: sparse.csr_matrix(
-            (row['fg_data_values'], row['fg_indices'], row['fg_indptr']),
-            shape=(1, row['fg_length'])
-        ).toarray().flatten(),
-        axis=1
-    )
-
-    full_dataset['fingerprint_array'] = full_dataset.apply(
-        lambda row: sparse.csr_matrix(
-            (row['fp_data_values'], row['fp_indices'], row['fp_indptr']),
-            shape=(1, row['fp_length'])
-        ).toarray().flatten(),
-        axis=1
-    )
-
-    # Convert fingerprint to numpy array
-    full_dataset['fingerprint_array'] = full_dataset['fingerprint_array'].apply(
-        lambda x: np.fromstring(x.strip('[]'), sep=' ') if isinstance(x, str) else np.array(x)
-    )
-    full_dataset['fg_array'] = full_dataset['fg_array'].apply(
-        lambda x: np.fromstring(x.strip('[]'), sep=' ') if isinstance(x, str) else np.array(x)
-    )
-
-    # Print First row
-    print(full_dataset['fingerprint_array'].iloc[0])
-
+    
     torch.manual_seed(42)  # For reproducibility
 
-    latent_dim = 32  # Example latent dimension
+    latent_dim = 16  # Example latent dimension
     encoder_hidden_dims = [1024, 512, 256, 128]  # Example encoder hidden layers
     decoder_hidden_dims = [128, 256, 1024]  # Example decoder hidden layers
     decoder_z_hidden_dims = [128, 256, 1024]  # Decoder layers for DISCoVeR
-    latent_dim_z = 32 # for CSVAE
-    latent_dim_w = 32 # for CSVAE
+    latent_dim_z = 16 # for CSVAE
+    latent_dim_w = 16 # for CSVAE
     encoder_hidden_dims_z = [1024, 512, 256, 128] # for CSVAE
     encoder_hidden_dims_w = [1024, 512, 256, 128] # for CSVAE
     adversarial_hidden_dims = [64] 
@@ -850,17 +816,20 @@ if __name__ == "__main__":
     learning_rate = 1e-3
     max_epochs = 5
 
+    fingerprint_dim = full_dataset['fp_length'].iloc[0]
+    fg_dim = full_dataset['fg_length'].iloc[0]
+
     for MODEL in MODELS:
         if MODEL is None:
             raise ValueError("MODEL must be defined before training.")
         elif MODEL == 'Base':
             print("Training BaseVAE model...")
-            input_dim = len(full_dataset['fingerprint_array'].iloc[0])  # Assuming fingerprint is a list of features
-        
+
             vae_trainer = train_base_model(
                 dataset=full_dataset,
-                input_dim=input_dim,
+                input_dim=fingerprint_dim,
                 latent_dim=latent_dim,
+                fg_dim=fg_dim,
                 encoder_hidden_dims=encoder_hidden_dims,
                 decoder_hidden_dims=decoder_hidden_dims,
                 batch_size=batch_size,
@@ -872,8 +841,6 @@ if __name__ == "__main__":
 
         elif MODEL == 'CVAE':
             print("Training CVAE model...")
-            fingerprint_dim = len(full_dataset['fingerprint_array'].iloc[0])
-            fg_dim = len(full_dataset['fg_array'].iloc[0])
 
             vae_trainer = train_conditional_vae(
                 dataset=full_dataset,
@@ -890,9 +857,8 @@ if __name__ == "__main__":
             save_model(vae_trainer, MODEL_OUTPUT, MODEL)
 
         elif MODEL == 'CSVAE':
-                print("Training CSVAE model based on the NeurIPS 2018 paper...")
-                fingerprint_dim = len(full_dataset['fingerprint_array'].iloc[0])
-                fg_dim = len(full_dataset['fg_array'].iloc[0])
+                print("Training CSVAE model")
+
                 vae_trainer = train_conditional_subspace_vae(
                     dataset=full_dataset,
                     fingerprint_dim=fingerprint_dim,
@@ -911,8 +877,7 @@ if __name__ == "__main__":
 
         elif MODEL == 'DISCoVeR':
                 print("Training DISCoVeR VAE model...")
-                fingerprint_dim = len(full_dataset['fingerprint_array'].iloc[0])
-                fg_dim = len(full_dataset['fg_array'].iloc[0])
+
                 vae_trainer = train_discover_vae(
                     dataset=full_dataset,
                     fingerprint_dim=fingerprint_dim,
@@ -929,3 +894,9 @@ if __name__ == "__main__":
                     max_epochs=max_epochs
                 )
                 save_model(vae_trainer, MODEL_OUTPUT, MODEL)
+
+        # Free memory after each model
+        del vae_trainer
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()

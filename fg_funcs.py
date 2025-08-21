@@ -144,11 +144,11 @@ def vae_loss(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the VAE loss, including reconstruction (BCE) and KL divergence, with optional beta weighting.
-    Returns total loss, BCE, and KLD, all normalized by batch size.
+    Returns total loss, BCE, and KLD.
     """
-    bce = nn.functional.binary_cross_entropy(recon_x, x, reduction='sum')
+    bce = nn.functional.binary_cross_entropy(recon_x, x, reduction='mean')
     kld = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
-    return (bce + beta * kld) / x.size(0), bce / x.size(0), kld / x.size(0)
+    return (bce + beta * kld) , bce , kld 
 
 def visualize_latent_space(
     model: nn.Module,
