@@ -215,7 +215,7 @@ def get_dbond2car(mol, functional_groups):
     return db2car_envs
 
 
-def col_mol(mol, functional_groups, rad = 0.5, lw = 2, width = 300, height = 250):
+def col_mol(mol, functional_groups, rad = 0.5, lw = 2, width = 900, height = 750):
     # Color functional groups in molecules like Ertl's paper
     cols = {"NO": (1, 0.3, 1, 0.8), # violet
             "O": (1, 0.6, 0.6, 0.9), # pink

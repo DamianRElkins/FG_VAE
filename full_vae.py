@@ -1,4 +1,4 @@
-from fg_funcs import save_model, train_base_model, train_conditional_vae, train_conditional_subspace_vae, train_discover_vae
+from VAE import save_model, train_base_model, train_conditional_vae, train_conditional_subspace_vae, train_discover_vae
 import torch
 import pandas as pd
 

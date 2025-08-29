@@ -1,0 +1,12 @@
+Metrics for latent latents_Base_4000_8: 0.63546
+Metrics for latent latents_Base_91321_8: 0.2714681180086793
+Metrics for latent latents_CVAE_4000_8: 0.34582
+Metrics for latent latents_CVAE_91321_8: 0.10792454956909568
+Metrics for latent latents_CSVAE_4000_8: 0.413565
+Metrics for latent latents_CSVAE_4000_8 (w): 0.47213499999999997
+Metrics for latent latents_CSVAE_91321_8: 0.11517796748877479
+Metrics for latent latents_CSVAE_91321_8 (w): 0.129129309118603
+Metrics for latent latents_DISCoVeR_4000_8: 0.47664999999999996
+Metrics for latent latents_DISCoVeR_4000_8 (w): 0.558895
+Metrics for latent latents_DISCoVeR_91321_8: 0.09127672092664077
+Metrics for latent latents_DISCoVeR_91321_8 (w): 0.18115631509873892

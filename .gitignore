@@ -165,6 +165,8 @@ runs/
 experiments/
 wandb/
 mlruns/
+images*/
+latents/
 
 # TensorBoard
 events.out.tfevents.*
