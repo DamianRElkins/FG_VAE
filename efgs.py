@@ -216,17 +216,17 @@ def get_dbond2car(mol, functional_groups):
 
 
 def col_mol(mol, functional_groups, rad = 0.5, lw = 2, width = 900, height = 750):
-    # Color functional groups in molecules like Ertl's paper
-    cols = {"NO": (1, 0.3, 1, 0.8), # violet
-            "O": (1, 0.6, 0.6, 0.9), # pink
-            "N": (0.4, 0.7, 0.9), # blue
-            "X": (0, 1, 0, 0.9), # green
-            "har": (1, 0.65, 0, 0.9), # orange
-            "S(O)": (1, 1, 0.2, 0.9), # yellow
-            "NOS": (0.7, 0.7, 0, 0.9), # pistacchio
-            "CC": (0.627, 0.627, 0.627, 0.9), # grey
-            "P,etc": (0.5, 1, 0.8, 0.9) # cyan
-            }
+    cols = {
+        "NO": (0.87, 0.67, 1.0, 0.8),    # soft lavender
+        "O": (1.0, 0.8, 0.8, 0.9),       # light rose
+        "N": (0.65, 0.85, 1.0, 0.9),     # baby blue
+        "X": (0.7, 1.0, 0.7, 0.9),       # mint green
+        "har": (1.0, 0.8, 0.6, 0.9),     # peach
+        "S(O)": (1.0, 1.0, 0.6, 0.9),    # soft yellow
+        "NOS": (0.8, 0.75, 0.95, 0.9),   # pastel lilac (new)
+        "CC": (0.8, 0.8, 0.8, 0.9),      # light grey
+        "P,etc": (0.7, 1.0, 0.9, 0.9)    # aquamarine
+    }
     
     ats_hl = {}
     bds_hl = {}
@@ -273,6 +273,7 @@ def col_mol(mol, functional_groups, rad = 0.5, lw = 2, width = 900, height = 750
     d2d = rdMolDraw2D.MolDraw2DCairo(width,height)
     dopts = d2d.drawOptions()
     dopts.atomHighlightsAreCircles = False
+    dopts.useBWAtomPalette()
     d2d.DrawMoleculeWithHighlights(mol, "", ats_hl, bds_hl, rdi_hl, lws_hl)
     d2d.FinishDrawing()
     return d2d.GetDrawingText()

@@ -16,6 +16,7 @@ from torch.utils.data import DataLoader, Dataset
 from sklearn.manifold import TSNE
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 from umap import UMAP
 
@@ -24,8 +25,11 @@ import rdkit.Chem as Chem
 from rdkit.Chem import AllChem
 from rdkit.Chem.Scaffolds import MurckoScaffold
 from rdkit.Chem import rdFingerprintGenerator
+from rdkit.DataStructs.cDataStructs import TanimotoSimilarity
+from rdkit.DataStructs import ExplicitBitVect
 
 import efgs
+import colorsys
 
 PATT: Chem.Mol = Chem.MolFromSmarts("[$([D1]=[*])]")
 REPL: Chem.Mol = Chem.MolFromSmiles("*")
@@ -204,6 +208,135 @@ def visualize_latent_space(
     plt.tight_layout()
     plt.show()
 
+def fingerprint_to_bv(fp: np.ndarray) -> ExplicitBitVect:
+    """Convert a numpy fingerprint array to RDKit ExplicitBitVect."""
+    bv = ExplicitBitVect(len(fp))
+    for i, bit in enumerate(fp.astype(int)):
+        if bit:
+            bv.SetBit(i)
+    return bv
+
+def visualize_latent_space_tanimoto(
+    model: nn.Module,
+    dataset: Dataset,
+    method: str = 'tsne',
+    sample_size: Optional[int] = None,
+    title: Optional[str] = None,
+    save_path: Optional[str] = None,
+    use_tanimoto_brightness: bool = True
+) -> None:
+    """
+    Visualize the latent space of a VAE model using t-SNE, PCA, or UMAP,
+    colored by the most frequent active FG, with optional brightness based on
+    Tanimoto similarity to the most central point.
+    """
+    model.eval()
+    latents, fg_labels, fingerprints = [], [], []
+
+    loader = DataLoader(dataset, batch_size=64, shuffle=False)
+    with torch.no_grad():
+        for batch in loader:
+            x, fg_vecs, _ = batch  # x is fingerprint or input tensor
+            _, mu, _ = model(x)
+            latents.append(mu.cpu())
+            fg_labels.append(fg_vecs.cpu())
+            fingerprints.append(x.cpu())
+
+    latents = torch.cat(latents).numpy()
+    fg_labels = torch.cat(fg_labels).numpy()
+    fingerprints = torch.cat(fingerprints).numpy()
+
+    np.random.seed(42)
+
+    if sample_size and sample_size < len(latents):
+        indices = np.random.choice(len(latents), sample_size, replace=False)
+        latents = latents[indices]
+        fg_labels = fg_labels[indices]
+        fingerprints = fingerprints[indices]
+
+    # Compute FG frequencies
+    fg_counts = np.sum(fg_labels, axis=0)
+
+    # Assign each point to the most frequent FG among its actives
+    point_fgs = []
+    for row in fg_labels:
+        active_fgs = np.where(row == 1)[0]
+        if len(active_fgs) == 0:
+            point_fgs.append(-1)
+        else:
+            point_fgs.append(active_fgs[np.argmax(fg_counts[active_fgs])])
+    point_fgs = np.array(point_fgs)
+
+    # Dimensionality reduction
+    if method == 'tsne':
+        reducer = TSNE(n_components=2, random_state=42)
+    elif method == 'pca':
+        reducer = PCA(n_components=2)
+    elif method == 'umap':
+        reducer = UMAP(n_components=2, random_state=42)
+    else:
+        raise ValueError("Invalid method. Choose from 'tsne', 'pca', 'umap'.")
+
+    latents_2d = reducer.fit_transform(latents)
+
+    # ----- Compute Tanimoto-based brightness -----
+    brightness = None
+    if use_tanimoto_brightness:
+        center_idx = np.argmin(np.linalg.norm(latents_2d - latents_2d.mean(axis=0), axis=1))
+        center_fp = fingerprint_to_bv(fingerprints[center_idx])
+
+        # Compute similarities for all points
+        similarities = np.array([
+            TanimotoSimilarity(fingerprint_to_bv(fp), center_fp)
+            for fp in fingerprints
+        ])
+
+        # Exclude center point from normalization
+        mask = np.ones_like(similarities, dtype=bool)
+        mask[center_idx] = False
+        sim_for_norm = similarities[mask]
+
+        # Print statistics excluding center
+        print(f"Similarity SD: {sim_for_norm.std():.4f}, Mean: {sim_for_norm.mean():.4f}")
+
+        # Normalize only the non-center similarities to [0.2, 1.0]
+        norm = 0.2 + 0.8 * (sim_for_norm - sim_for_norm.min()) / (sim_for_norm.max() - sim_for_norm.min())
+
+        # Reinsert brightness with center point forced to full brightness (1.0)
+        brightness = np.empty_like(similarities)
+        brightness[mask] = norm
+        brightness[center_idx] = 1.0
+
+    # ----- Plot -----
+    plt.figure(figsize=(8, 7))
+    # Get colors for each FG, then adjust brightness
+    palette = sns.color_palette('tab10', n_colors=len(np.unique(point_fgs)))
+    fg_to_color = {fg: palette[i % len(palette)] for i, fg in enumerate(np.unique(point_fgs))}
+    base_colors = np.array([fg_to_color[fg] for fg in point_fgs])
+
+    if brightness is not None:
+        # Convert RGB to HSV, adjust V, then back to RGB
+        colors = []
+        for rgb, v in zip(base_colors, brightness):
+            hsv = colorsys.rgb_to_hsv(*rgb)
+            rgb_new = colorsys.hsv_to_rgb(hsv[0], hsv[1], v)
+            colors.append(rgb_new)
+        colors = np.array(colors)
+    else:
+        colors = base_colors
+
+    plt.scatter(latents_2d[:, 0], latents_2d[:, 1], c=colors, s=20)
+    plt.title(title or f"Latent Space Colored by Most Frequent FG ({method.upper()})")
+    plt.xlabel("Dim 1")
+    plt.ylabel("Dim 2")
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(save_path, exist_ok=True)
+        plt.savefig(os.path.join(save_path, "latent_space_combined.png"), dpi=300)
+    plt.show()
+
+
 def perform_umap_on_fingerprints(
     data: Any,
     fingerprint_col: str = 'fingerprint_array',
@@ -274,6 +407,8 @@ def visualize_latent_space_per_fg(
     latents = np.vstack(latents_list)
     fg_labels = np.vstack(fg_list)  # Shape: (N, num_fgs)
 
+    np.random.seed(42)
+
     if sample_size and sample_size < len(latents):
         indices = np.random.choice(len(latents), sample_size, replace=False)
         latents = latents[indices]
@@ -312,8 +447,6 @@ def visualize_latent_space_per_fg(
     plt.title(combined_title or f"Latent space colored by MOST FREQUENT FG ({method.upper()})")
     plt.xlabel("Dim 1")
     plt.ylabel("Dim 2")
-    plt.legend(title="Dominant FG", bbox_to_anchor=(1.05, 1),
-               loc='upper left', borderaxespad=0.)
     plt.tight_layout()
 
     if save_path:
@@ -347,30 +480,6 @@ def visualize_latent_space_per_fg(
         plt.savefig(os.path.join(save_path, "per_fg_latent_space.png"), dpi=300)
     plt.show()
 
-
-def f1_score(
-    y_true: np.ndarray,
-    y_pred: np.ndarray
-) -> Tuple[float, float, float]:
-    """
-    Compute F1 score, precision, and recall for binary classification arrays.
-    """
-    tp = np.sum((y_true == 1) & (y_pred == 1))
-    fp = np.sum((y_true == 0) & (y_pred == 1))
-    fn = np.sum((y_true == 1) & (y_pred == 0))
-
-    if tp + fp == 0 or tp + fn == 0:
-        return 0.0, 0.0, 0.0
-
-    precision = tp / (tp + fp)
-    recall = tp / (tp + fn)
-
-    if precision + recall == 0:
-        return 0.0, 0.0, 0.0
-
-    f1 = 2 * (precision * recall) / (precision + recall)
-
-    return f1, precision, recall
 
 def matthews_corrcoef(
     y_true: np.ndarray,
@@ -639,17 +748,20 @@ def metric(
     latent: np.ndarray,
     fg_counts: np.ndarray,
     fg_labels: np.ndarray,
-    n_neighbors: int = 50
+    n_neighbors: int = 50,
+    n_random: int = 100
 ) -> float:
     """
     Combined metric: Weighted Tanimoto similarity normalized by expected random similarity.
     """
+    # Step 1: Find neighbors for the query point
     distances, indices = find_nearest_neighbors(nbrs, latent[query_index], n_neighbors)
 
-    # Inverse prevalence weights (avoid division by zero)
+    # Step 2: Compute inverse prevalence weights
     weights = 1.0 / (fg_counts + 1e-8)
     weights /= np.sum(weights)
 
+    # Step 3: Compute neighbor weighted Tanimoto scores
     tanimoto_scores = np.zeros(len(indices), dtype=float)
     for i, idx in enumerate(indices):
         neighbor_fg = fg_labels[idx]
@@ -657,7 +769,8 @@ def metric(
 
     avg_weighted_tanimoto = np.mean(tanimoto_scores) if len(tanimoto_scores) > 0 else 0.0
 
-    return avg_weighted_tanimoto #  [1,0,0,1]
+    return avg_weighted_tanimoto
+
 
 def extract_and_save_latents(
     model_path,
@@ -709,12 +822,10 @@ def extract_and_save_latents(
             elif model_type == "CVAE":
                 mu_z, logvar_z = model.encode(x, y)
                 z = model.reparameterize(mu_z, logvar_z)
-            elif model_type in ["CSVAE", "DISCoVeR"]:
+            else:
                 mu_z, logvar_z, mu_w, logvar_w = model.encode(x, y)
                 z = model.reparameterize(mu_z, logvar_z)
                 w = model.reparameterize(mu_w, logvar_w)
-            else:
-                raise ValueError(f"Unsupported model type: {model_type}")
 
             z_list.append(z.cpu())
             if w is not None:
@@ -748,6 +859,106 @@ def extract_and_save_latents(
 
     return df
 
+def evaluate_reconstructions(
+    model_path,
+    dataloader,
+    model_type,
+    model_class,  # LightningModule class
+    device="cpu",
+    map_location=None,
+    thresholds=np.arange(0.05, 0.96, 0.05)  # Candidate thresholds for auto-selection
+):
+    """
+    Evaluate reconstruction metrics for sparse binary vectors using a trained LightningModule (.ckpt).
+    Automatically selects the threshold that maximizes F1 score.
+
+    Supports BaseVAE, ConditionalVAE, ConditionalSubspaceVAE, DiscoverVAE.
+
+    Returns:
+        pd.DataFrame: DataFrame with reconstruction metrics for the dataset.
+    """
+    model_path = Path(model_path)
+    print(f"Loading {model_type} model from {model_path}...")
+
+    # Load model
+    model = model_class.load_from_checkpoint(str(model_path), map_location=map_location).model
+    model = model.to(device)
+    model.eval()
+
+    y_true_list, y_pred_probs_list = [], []
+
+    with torch.no_grad():
+        for batch in dataloader:
+            if isinstance(batch, (list, tuple)):
+                x = batch[0].to(device)
+                y = batch[1].to(device) if len(batch) > 1 and torch.is_tensor(batch[1]) else None
+            else:
+                x, y = batch.to(device)
+
+            # Forward pass
+            if model_type == "Base":
+                x_recon, *_ = model(x)
+            elif model_type in ["CVAE", "CSVAE", "DISCoVeR"]:
+                x_recon, *_ = model(x, y)
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
+
+            # Save ground truth and predicted probabilities
+            y_true_list.append(x.cpu().numpy().astype(int))
+            y_pred_probs_list.append(torch.sigmoid(x_recon).cpu().numpy())
+
+    y_true_all = np.vstack(y_true_list)
+    y_pred_probs_all = np.vstack(y_pred_probs_list)
+
+    # -------------------------
+    # Automatically select threshold
+    # -------------------------
+    best_threshold = None
+    best_f1 = -1
+
+    for t in thresholds:
+        f1s = []
+        for y_true_vec, y_prob_vec in zip(y_true_all, y_pred_probs_all):
+            y_pred_vec = (y_prob_vec > t).astype(int)
+            f1s.append(f1_score(y_true_vec, y_pred_vec, zero_division=0))
+        avg_f1 = np.mean(f1s)
+        if avg_f1 > best_f1:
+            best_f1 = avg_f1
+            best_threshold = t
+
+    print(f"Selected threshold based on max F1: {best_threshold:.3f} (F1={best_f1:.4f})")
+
+    # -------------------------
+    # Compute final metrics using best threshold
+    # -------------------------
+    acc_list, prec_list, rec_list, f1_list = [], [], [], []
+
+    for y_true_vec, y_prob_vec in zip(y_true_all, y_pred_probs_all):
+        y_pred_vec = (y_prob_vec > best_threshold).astype(int)
+        acc_list.append((y_true_vec == y_pred_vec).mean())
+        prec_list.append(precision_score(y_true_vec, y_pred_vec, zero_division=0))
+        rec_list.append(recall_score(y_true_vec, y_pred_vec, zero_division=0))
+        f1_list.append(f1_score(y_true_vec, y_pred_vec, zero_division=0))
+
+    metrics = {
+        "threshold": best_threshold,
+        "accuracy": np.mean(acc_list),
+        "precision": np.mean(prec_list),
+        "recall": np.mean(rec_list),
+        "f1": np.mean(f1_list),
+    }
+
+    df = pd.DataFrame([metrics])
+
+    # Save CSV
+    output_csv = f"metrics/reconstruction_metrics_{str(model_path).split('/')[1]}.csv"
+    Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_csv, index=False)
+    print(f"Saved reconstruction metrics to {output_csv}")
+
+    return df
+
+
 def extract_prefixed_arrays(csv_path: str, prefixes: list[str]) -> pd.DataFrame:
     """
     Combines columns with specified prefixes into single array columns in a DataFrame.
@@ -778,4 +989,32 @@ def extract_prefixed_arrays(csv_path: str, prefixes: list[str]) -> pd.DataFrame:
     result_df = pd.concat([df[remaining_cols], pd.DataFrame(combined_data)], axis=1)
 
     return result_df
+    
 
+def molecule_similarity(z_i, z_j, distance_metric="euclidean"):
+    """
+    Calculate similarity between two vectors based on the chosen distance metric.
+    
+    Parameters:
+    z_i, z_j : np.ndarray
+        Input vectors representing molecules.
+    distance_metric : str
+        "euclidean" or "cosine"
+        
+    Returns:
+    float
+        Similarity score between 0 and 1.
+    """
+    z_i = np.array(z_i)
+    z_j = np.array(z_j)
+    
+    if distance_metric == "euclidean":
+        d = np.linalg.norm(z_i - z_j, 2)
+        similarity = 1 / (1 + d)
+    elif distance_metric == "cosine":
+        cos_sim = np.dot(z_i, z_j) / (np.linalg.norm(z_i) * np.linalg.norm(z_j))
+        similarity = cos_sim
+    else:
+        raise ValueError("distance_metric must be 'euclidean' or 'cosine'")
+    
+    return similarity
