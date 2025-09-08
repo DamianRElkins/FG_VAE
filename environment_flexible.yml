@@ -1,0 +1,30 @@
+name: rdkit-thesis-new
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.12  # Use Python 3.12 instead of 3.13 for better compatibility
+  - pip
+  - rdkit
+  - pytorch
+  - torchaudio 
+  - torchvision
+  - pytorch-lightning
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - umap-learn
+  - ipykernel
+  - jupyterlab
+  - pycairo
+  - reportlab
+  - pybind11
+  - numba
+  - cmake  # Add cmake for building packages
+  - pip:
+      - faiss-cpu
+      - wandb
+      - multilabel-knn

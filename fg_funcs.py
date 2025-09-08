@@ -18,6 +18,8 @@ from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
 from sklearn.metrics import precision_score, recall_score, f1_score
 
+from scipy.stats import gaussian_kde
+
 from umap import UMAP
 
 from rdkit import DataStructs
@@ -299,8 +301,15 @@ def visualize_latent_space_tanimoto(
         # Print statistics excluding center
         print(f"Similarity SD: {sim_for_norm.std():.4f}, Mean: {sim_for_norm.mean():.4f}")
 
-        # Normalize only the non-center similarities to [0.2, 1.0]
-        norm = 0.2 + 0.8 * (sim_for_norm - sim_for_norm.min()) / (sim_for_norm.max() - sim_for_norm.min())
+        # Standard normalization
+        norm = (sim_for_norm - sim_for_norm.mean()) / sim_for_norm.std()
+
+        # Exponential scaling to exaggerate differences
+        norm = np.exp(norm)  # all positive, larger values more distinct
+
+        # Normalize to [0.2, 1.0] for V
+        norm = 0.2 + 0.8 * (norm - norm.min()) / (norm.max() - norm.min())
+
 
         # Reinsert brightness with center point forced to full brightness (1.0)
         brightness = np.empty_like(similarities)
@@ -308,8 +317,9 @@ def visualize_latent_space_tanimoto(
         brightness[center_idx] = 1.0
 
     # ----- Plot -----
-    plt.figure(figsize=(8, 7))
-    # Get colors for each FG, then adjust brightness
+    plt.figure(figsize=(8, 7), dpi=500)
+
+    # Get colors for each FG
     palette = sns.color_palette('tab10', n_colors=len(np.unique(point_fgs)))
     fg_to_color = {fg: palette[i % len(palette)] for i, fg in enumerate(np.unique(point_fgs))}
     base_colors = np.array([fg_to_color[fg] for fg in point_fgs])
@@ -325,16 +335,110 @@ def visualize_latent_space_tanimoto(
     else:
         colors = base_colors
 
-    plt.scatter(latents_2d[:, 0], latents_2d[:, 1], c=colors, s=20)
+    # Plot all points except the center
+    mask = np.ones(len(latents_2d), dtype=bool)
+    mask[center_idx] = False
+    plt.scatter(latents_2d[mask, 0], latents_2d[mask, 1],
+                c=colors[mask], s=20, alpha=0.8)
+
+    # Plot the center point last with a dark circle
+    plt.scatter(latents_2d[center_idx, 0], latents_2d[center_idx, 1],
+                c=[colors[center_idx]], s=60, edgecolor='k', linewidth=1.5, zorder=10)
+
     plt.title(title or f"Latent Space Colored by Most Frequent FG ({method.upper()})")
     plt.xlabel("Dim 1")
     plt.ylabel("Dim 2")
     plt.tight_layout()
+    plt.show()
+
+
+
+def visualize_latent_space_3d_kde(
+    model: nn.Module,
+    dataset: Dataset,
+    method: str = 'tsne',
+    sample_size: Optional[int] = None,
+    title: Optional[str] = None,
+    save_path: Optional[str] = None,
+    use_tanimoto_z: bool = True
+):
+    """
+    Visualize the latent space of a VAE model in 3D using t-SNE, PCA, or UMAP,
+    colored by most frequent FG, with Z-axis optionally representing Tanimoto similarity
+    and an overlaid KDE surface to show density.
+    """
+    model.eval()
+    latents, fg_labels, fingerprints = [], [], []
+
+    loader = DataLoader(dataset, batch_size=64, shuffle=False)
+    with torch.no_grad():
+        for batch in loader:
+            x, fg_vecs, _ = batch
+            _, mu, _ = model(x)
+            latents.append(mu.cpu())
+            fg_labels.append(fg_vecs.cpu())
+            fingerprints.append(x.cpu())
+
+    latents = torch.cat(latents).numpy()
+    fg_labels = torch.cat(fg_labels).numpy()
+    fingerprints = torch.cat(fingerprints).numpy()
+
+    if sample_size and sample_size < len(latents):
+        indices = np.random.choice(len(latents), sample_size, replace=False)
+        latents = latents[indices]
+        fg_labels = fg_labels[indices]
+        fingerprints = fingerprints[indices]
+
+    # Assign dominant FG per point
+    fg_counts = np.sum(fg_labels, axis=0)
+    point_fgs = []
+    for row in fg_labels:
+        active_fgs = np.where(row == 1)[0]
+        point_fgs.append(active_fgs[np.argmax(fg_counts[active_fgs])] if len(active_fgs) > 0 else -1)
+    point_fgs = np.array(point_fgs)
+
+    # Dimensionality reduction
+    reducer = {'tsne': TSNE, 'pca': PCA, 'umap': UMAP}[method](n_components=2, random_state=42)
+    latents_2d = reducer.fit_transform(latents)
+
+    # Compute Z-axis (Tanimoto similarity)
+    if use_tanimoto_z:
+        center_idx = np.argmin(np.linalg.norm(latents_2d - latents_2d.mean(axis=0), axis=1))
+        center_fp = fingerprint_to_bv(fingerprints[center_idx])
+        z = np.array([TanimotoSimilarity(fingerprint_to_bv(fp), center_fp) for fp in fingerprints])
+    else:
+        z = np.zeros(len(latents_2d))
+
+    # ----- Compute 3D KDE for density -----
+    xyz = np.vstack([latents_2d[:, 0], latents_2d[:, 1], z])
+    kde = gaussian_kde(xyz)(xyz)
+    kde_norm = (kde - kde.min()) / (kde.max() - kde.min())  # normalize to [0,1]
+
+    # ----- 3D Scatter Plot -----
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    palette = sns.color_palette('tab10', n_colors=len(np.unique(point_fgs)))
+    fg_to_color = {fg: palette[i % len(palette)] for i, fg in enumerate(np.unique(point_fgs))}
+    colors = [fg_to_color[fg] for fg in point_fgs]
+
+    # Scatter plot colored by FG, size scaled by KDE density
+    ax.scatter(
+        latents_2d[:, 0], latents_2d[:, 1], z,
+        c=colors, s=20 + 100*kde_norm, alpha=0.6
+    )
+
+    ax.set_xlabel("Latent Dim 1")
+    ax.set_ylabel("Latent Dim 2")
+    ax.set_zlabel("Tanimoto Similarity" if use_tanimoto_z else "Z")
+    ax.set_title(title or f"3D Latent Space with KDE ({method.upper()})")
+    plt.tight_layout()
 
     if save_path:
         os.makedirs(save_path, exist_ok=True)
-        plt.savefig(os.path.join(save_path, "latent_space_combined.png"), dpi=300)
+        plt.savefig(os.path.join(save_path, "latent_space_3d_kde.png"), dpi=300)
     plt.show()
+
 
 
 def perform_umap_on_fingerprints(
@@ -387,7 +491,8 @@ def visualize_latent_space_per_fg(
     sample_size: Optional[int] = None,
     combined_title: Optional[str] = None,
     per_fg_title: Optional[str] = None,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    fg_names: List[str] = None
 ) -> None:
     """
     Visualizes a latent space with two plots:
@@ -402,6 +507,7 @@ def visualize_latent_space_per_fg(
         combined_title (Optional[str]): Title for the combined plot.
         per_fg_title (Optional[str]): Title for the per-FG subplot figure.
         save_path (Optional[str]): Directory path to save the figures. If None, figures are not saved.
+        fg_names (List[str]): List of molecule names, one per point (must match total N).
     """
     # Concatenate all latents and FG arrays
     latents = np.vstack(latents_list)
@@ -413,6 +519,8 @@ def visualize_latent_space_per_fg(
         indices = np.random.choice(len(latents), sample_size, replace=False)
         latents = latents[indices]
         fg_labels = fg_labels[indices]
+        if fg_names is not None:
+            fg_names = [fg_names[i] for i in indices]
 
     # Compute global frequencies of each FG
     fg_counts = np.sum(fg_labels, axis=0)
@@ -442,8 +550,41 @@ def visualize_latent_space_per_fg(
 
     # ----- Plot 1: Combined -----
     plt.figure(figsize=(8, 7))
-    sns.scatterplot(x=latents_2d[:, 0], y=latents_2d[:, 1], hue=point_fgs,
-                    palette='tab10', alpha=0.8, s=20)
+    # Map FG indices to names if fg_names is provided
+    if fg_names is not None and isinstance(fg_names, list) and len(fg_names) == fg_labels.shape[1]:
+        unique_fgs = np.unique(point_fgs)
+        sorted_fgs = sorted(unique_fgs)
+        fg_labels_map = {fg: (fg_names[fg] if fg >= 0 and fg < len(fg_names) else "None") for fg in sorted_fgs}
+        hue_labels = [fg_labels_map[fg] for fg in point_fgs]
+        palette_colors = sns.color_palette('tab10', n_colors=len(sorted_fgs))
+        palette = dict(zip([fg_labels_map[fg] for fg in sorted_fgs], palette_colors))
+        scatter = sns.scatterplot(x=latents_2d[:, 0], y=latents_2d[:, 1], hue=hue_labels,
+                                  palette=palette, alpha=0.8, s=20)
+        handles, labels = scatter.get_legend_handles_labels()
+        label_order = [fg_labels_map[fg] for fg in sorted_fgs]
+        ordered_handles = [handles[labels.index(lbl)] for lbl in label_order if lbl in labels]
+        scatter.legend(ordered_handles, label_order, title="Functional Groups",
+                       bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+        fg_idx_to_color = {fg: palette[fg_labels_map[fg]] for fg in sorted_fgs}
+        fg_idx_to_name = {fg: fg_labels_map[fg] for fg in sorted_fgs}
+        fg_idx_to_color[-1] = (0.5, 0.5, 0.5)
+        fg_idx_to_name[-1] = "None"
+    else:
+        unique_fgs = np.unique(point_fgs)
+        sorted_fgs = sorted(unique_fgs)
+        palette_colors = sns.color_palette('tab10', n_colors=len(sorted_fgs))
+        fg_idx_to_color = {fg: palette_colors[i] for i, fg in enumerate(sorted_fgs)}
+        fg_idx_to_name = {fg: str(fg) for fg in sorted_fgs}
+        fg_idx_to_color[-1] = (0.5, 0.5, 0.5)
+        fg_idx_to_name[-1] = "None"
+        scatter = sns.scatterplot(x=latents_2d[:, 0], y=latents_2d[:, 1], hue=point_fgs,
+                                  palette=fg_idx_to_color, alpha=0.8, s=20)
+        handles, labels = scatter.get_legend_handles_labels()
+        label_order = [str(fg) for fg in sorted_fgs]
+        ordered_handles = [handles[labels.index(lbl)] for lbl in label_order if lbl in labels]
+        scatter.legend(ordered_handles, label_order, title="Functional Groups",
+                       bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+
     plt.title(combined_title or f"Latent space colored by MOST FREQUENT FG ({method.upper()})")
     plt.xlabel("Dim 1")
     plt.ylabel("Dim 2")
@@ -462,12 +603,52 @@ def visualize_latent_space_per_fg(
                              sharex=True, sharey=True)
     axes = axes.flatten()
 
+    # Use fg_names for molecule names if provided and length matches number of points
+    molecule_names = fg_names if fg_names is not None and len(fg_names) == len(latents_2d) else None
+
     for idx in range(num_fgs):
         mask = fg_labels[:, idx] == 1  # includes multiclass points
-        axes[idx].scatter(latents_2d[mask, 0], latents_2d[mask, 1], alpha=0.8, s=20)
-        axes[idx].set_title(f"FG {idx} (n={mask.sum()})")
+        multiclass_mask = (fg_labels.sum(axis=1) > 1) & mask
+        singleclass_mask = (fg_labels.sum(axis=1) == 1) & mask
+
+        # Plot single-class points in their original color
+        singleclass_fgs = point_fgs[singleclass_mask]
+        singleclass_colors = [fg_idx_to_color[fg] for fg in singleclass_fgs]
+        axes[idx].scatter(latents_2d[singleclass_mask, 0], latents_2d[singleclass_mask, 1],
+                          alpha=0.8, s=20, color=singleclass_colors, label="Single FG")
+
+        # For multiclass points, use the color of their alternate class (not idx)
+        multiclass_indices = np.where(multiclass_mask)[0]
+        for i in multiclass_indices:
+            # Find alternate class (not idx) among active FGs
+            active_fgs = np.where(fg_labels[i] == 1)[0]
+            alternate_fgs = [fg for fg in active_fgs if fg != idx]
+            # Use the color of the alternate class with highest frequency (or just the first)
+            if alternate_fgs:
+                alt_fg = alternate_fgs[np.argmax(fg_counts[alternate_fgs])]
+                color = fg_idx_to_color.get(alt_fg, "red")
+            else:
+                color = "red"
+            axes[idx].scatter(latents_2d[i, 0], latents_2d[i, 1],
+                              alpha=0.8, s=20, color=[color], label="Multi FG" if i == multiclass_indices[0] else None)
+            # Annotate with molecule name if available
+            if molecule_names is not None:
+                axes[idx].annotate(str(molecule_names[i]), (latents_2d[i, 0], latents_2d[i, 1]),
+                                   fontsize=7, alpha=0.7, xytext=(2, 2), textcoords='offset points')
+
+        # Optionally annotate singleclass points as well
+        if molecule_names is not None:
+            for i in np.where(singleclass_mask)[0]:
+                axes[idx].annotate(str(molecule_names[i]), (latents_2d[i, 0], latents_2d[i, 1]),
+                                   fontsize=7, alpha=0.7, xytext=(2, 2), textcoords='offset points')
+
+        axes[idx].set_title(f"{fg_idx_to_name.get(idx, f'FG {idx}')} (n={mask.sum()})")
         axes[idx].set_xlabel("Dim 1")
         axes[idx].set_ylabel("Dim 2")
+        # Only show unique legend entries
+        handles, labels = axes[idx].get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        axes[idx].legend(by_label.values(), by_label.keys(), loc="best", fontsize="small")
 
     # Hide unused subplots
     for ax in axes[num_fgs:]:
@@ -778,7 +959,9 @@ def extract_and_save_latents(
     model_type,
     model_class,   # LightningModule class
     device="cpu",
-    map_location=None
+    smiles_list=None,
+    map_location=None,
+    output_csv=None
 ):
     """
     Extract latent variables from a trained LightningModule (.ckpt) and save to CSV.
@@ -792,9 +975,10 @@ def extract_and_save_latents(
         model_class (LightningModule): Class to load from checkpoint.
         device (str): 'cpu', 'cuda', or 'mps'.
         map_location: optional, for torch.load
+        smiles_list (pd.Series or list[str], optional): Series or list of SMILES strings, one per datapoint.
 
     Returns:
-        pd.DataFrame: Latents DataFrame including y if present.
+        pd.DataFrame: Latents DataFrame including y if present and SMILES if provided.
     """
     model_path = Path(model_path)
     print(f"Loading {model_type} model from {model_path}...")
@@ -851,11 +1035,19 @@ def extract_and_save_latents(
 
     df = pd.DataFrame(data)
 
+    # Add SMILES column if provided (pd.Series or list)
+    if smiles_list is not None:
+        smiles_arr = smiles_list.values if isinstance(smiles_list, pd.Series) else smiles_list
+        if len(smiles_arr) != len(df):
+            raise ValueError(f"Length of smiles_list ({len(smiles_arr)}) does not match number of rows ({len(df)})")
+        df.insert(0, "smiles", smiles_arr)
+
     # Save CSV
-    output_csv = f"latents/latents_{model_type}_{len(dataloader.dataset)}_{z_tensor.shape[1]}.csv"
+    if output_csv is None:
+        output_csv = f"latents/latents_{model_type}_{len(dataloader.dataset)}_{z_tensor.shape[1]}.csv"
     Path(output_csv).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_csv, index=False)
-    print(f"Saved latents (including y) to {output_csv}")
+    print(f"Saved latents (including y and smiles) to {output_csv}")
 
     return df
 
@@ -897,9 +1089,11 @@ def evaluate_reconstructions(
 
             # Forward pass
             if model_type == "Base":
-                x_recon, *_ = model(x)
+                x_logits, *_ = model(x)
+                x_recon = torch.sigmoid(x_logits)
             elif model_type in ["CVAE", "CSVAE", "DISCoVeR"]:
-                x_recon, *_ = model(x, y)
+                x_logits, *_ = model(x, y)
+                x_recon = torch.sigmoid(x_logits)
             else:
                 raise ValueError(f"Unsupported model type: {model_type}")
 
@@ -962,7 +1156,7 @@ def evaluate_reconstructions(
 def extract_prefixed_arrays(csv_path: str, prefixes: list[str]) -> pd.DataFrame:
     """
     Combines columns with specified prefixes into single array columns in a DataFrame.
-    All other columns remain untouched.
+    All other columns remain untouched, including a 'smiles' column if present.
 
     Parameters:
         csv_path (str): Path to the CSV file.
@@ -984,12 +1178,16 @@ def extract_prefixed_arrays(csv_path: str, prefixes: list[str]) -> pd.DataFrame:
             combined_data[prefix] = df[cols].apply(lambda row: row.to_numpy(), axis=1)
             used_cols.update(cols)
 
-    # Keep all columns that were not combined
-    remaining_cols = [col for col in df.columns if col not in used_cols]
-    result_df = pd.concat([df[remaining_cols], pd.DataFrame(combined_data)], axis=1)
+    # Always keep 'smiles' column first if present
+    cols_to_keep = []
+    if 'smiles' in df.columns:
+        cols_to_keep.append('smiles')
+    # Keep all columns that were not combined and are not 'smiles'
+    cols_to_keep += [col for col in df.columns if col not in used_cols and col != 'smiles']
+
+    result_df = pd.concat([df[cols_to_keep], pd.DataFrame(combined_data)], axis=1)
 
     return result_df
-    
 
 def molecule_similarity(z_i, z_j, distance_metric="euclidean"):
     """

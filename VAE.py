@@ -130,11 +130,9 @@ class BaseVAE(L.LightningModule):
         return self.decode(z), mu, log_var
     
 
-    
-
 # -------- Base Model Trainer --------    
 class BaseVAETrainer(L.LightningModule):
-    def __init__(self, input_dim, encoder_hidden_dim, decoder_hidden_dim, latent_dim, learning_rate):
+    def __init__(self, input_dim, encoder_hidden_dim, decoder_hidden_dim, latent_dim, learning_rate, beta):
         super().__init__()
         self.save_hyperparameters()
         self.model = BaseVAE(
@@ -144,7 +142,7 @@ class BaseVAETrainer(L.LightningModule):
             decoder_hidden_dims=decoder_hidden_dim
         )
         self.learning_rate = learning_rate
-        self.weights = torch.ones(input_dim)  # Initialize weights for BCE loss
+        self.beta = beta
 
     def forward(self, x):
         return self.model(x)
@@ -152,8 +150,7 @@ class BaseVAETrainer(L.LightningModule):
     def training_step(self, batch, batch_idx):
         x, _, _ = batch
         recon_x, mu, log_var = self(x)
-        beta = min(1.5, self.current_epoch / 2)  # Gradually increase beta
-        loss, bce, kld = vae_loss(recon_x, x, mu, log_var, beta=beta)
+        loss, bce, kld = vae_loss(recon_x, x, mu, log_var, beta=self.beta)
         self.log('train_loss', loss)
         self.log('train_bce', bce)
         self.log('train_kld', kld)
@@ -181,7 +178,7 @@ class BaseVAETrainer(L.LightningModule):
         return optim.Adam(self.parameters(), lr=self.learning_rate)
 
 # -------- Base Model Training Function --------
-def train_base_model(dataset, input_dim, latent_dim, fg_dim, encoder_hidden_dims, decoder_hidden_dims, batch_size=64, learning_rate=1e-3, max_epochs=50, sparse=True):
+def train_base_model(dataset, input_dim, latent_dim, fg_dim, encoder_hidden_dims, decoder_hidden_dims, beta, batch_size=64, learning_rate=1e-3, max_epochs=50, sparse=True):
     # Split dataset into train, validation, and test sets
     train_data, test_data = train_test_split(dataset, test_size=0.2, random_state=42)
     val_data, test_data = train_test_split(test_data, test_size=0.5, random_state=42)
@@ -202,7 +199,8 @@ def train_base_model(dataset, input_dim, latent_dim, fg_dim, encoder_hidden_dims
         encoder_hidden_dim=encoder_hidden_dims,
         decoder_hidden_dim=decoder_hidden_dims,
         latent_dim=latent_dim,
-        learning_rate=learning_rate
+        learning_rate=learning_rate,
+        beta=beta
     )
 
     # Initialize Wandb logger
@@ -211,7 +209,7 @@ def train_base_model(dataset, input_dim, latent_dim, fg_dim, encoder_hidden_dims
     # Save model checkpoints
     checkpoint_callback = L.pytorch_lightning.callbacks.ModelCheckpoint(
         monitor='val_loss',
-        dirpath=f'checkpoints/fg_bvae_{fg_dim}_{latent_dim}',
+        dirpath=f'checkpoints/fg_bvae_{fg_dim}_{latent_dim}_{model.beta}',
         filename='best-checkpoint',
         save_top_k=1,
         mode='min'
